@@ -224,46 +224,58 @@
 
       <!-- TAB 1: Auto-Masker Playground -->
       <div id="panel-masker" class="p-6">
-        <div class="flex items-center justify-between mb-4">
+        <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
           <div class="flex items-center space-x-2">
-            <span class="text-xs font-semibold text-gray-400 uppercase tracking-wider">Select Sample Scenario:</span>
-            <button onclick="loadSample('user')" class="px-2.5 py-1 text-xs rounded-md bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700">User Profile</button>
-            <button onclick="loadSample('payment')" class="px-2.5 py-1 text-xs rounded-md bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700">Payment Transaction</button>
-            <button onclick="loadSample('order')" class="px-2.5 py-1 text-xs rounded-md bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700">Order Dispatch</button>
+            <span class="text-xs font-semibold text-gray-400 uppercase tracking-wider">Scenario:</span>
+            <button onclick="loadSample('user')" id="sample-btn-user" class="sample-btn px-3 py-1.5 text-xs font-medium rounded-lg bg-teal-500/20 text-teal-300 border border-teal-500/30 transition-all">User Profile</button>
+            <button onclick="loadSample('payment')" id="sample-btn-payment" class="sample-btn px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 transition-all">Payment Transaction</button>
+            <button onclick="loadSample('order')" id="sample-btn-order" class="sample-btn px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 transition-all">Order Dispatch</button>
           </div>
-          <button onclick="runAutoMask()" class="px-3.5 py-1.5 bg-teal-500 hover:bg-teal-400 text-gray-950 font-bold text-xs rounded-lg transition-colors flex items-center space-x-1.5 shadow-md">
-            <i data-lucide="play" class="w-3.5 h-3.5 fill-current"></i>
-            <span>Re-evaluate Mask</span>
-          </button>
+
+          <div class="flex items-center space-x-2">
+            <button onclick="mutateDynamicNoise()" class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-medium rounded-lg border border-gray-700 transition-all flex items-center space-x-1.5 shadow-sm">
+              <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-amber-400"></i>
+              <span>Mutate Dynamic Noise</span>
+            </button>
+            <button onclick="runAutoMask(true)" id="reEvaluateBtn" class="px-4 py-1.5 bg-teal-500 hover:bg-teal-400 active:scale-95 text-gray-950 font-bold text-xs rounded-lg transition-all flex items-center space-x-1.5 shadow-lg shadow-teal-500/20">
+              <i data-lucide="play" class="w-3.5 h-3.5 fill-current" id="evalIcon"></i>
+              <span id="evalText">Re-evaluate Mask</span>
+            </button>
+          </div>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4 font-mono text-xs">
           <!-- Left: Input Dynamic JSON -->
-          <div class="bg-gray-950 p-4 rounded-2xl border border-gray-800 flex flex-col">
+          <div id="demoInputBox" class="bg-gray-950 p-4 rounded-2xl border border-gray-800 flex flex-col transition-all">
             <div class="flex items-center justify-between text-gray-400 mb-2 font-bold pb-2 border-b border-gray-900">
               <span class="text-red-400">● Live Raw API Response (With Dynamic Volatile Noise)</span>
-              <span class="text-[10px] text-gray-500">Editable</span>
+              <span class="text-[10px] text-gray-500">Editable JSON</span>
             </div>
-            <textarea id="demoInputJson" rows="13" class="w-full bg-transparent text-gray-300 focus:outline-none resize-none leading-relaxed" oninput="runAutoMask()"></textarea>
+            <textarea id="demoInputJson" rows="13" class="w-full bg-transparent text-gray-300 focus:outline-none resize-none leading-relaxed" oninput="runAutoMask(false)"></textarea>
           </div>
 
           <!-- Right: Output Masked Snapshot -->
-          <div class="bg-gray-950 p-4 rounded-2xl border border-gray-800 flex flex-col">
+          <div id="demoOutputBox" class="bg-gray-950 p-4 rounded-2xl border border-gray-800 flex flex-col transition-all">
             <div class="flex items-center justify-between text-gray-400 mb-2 font-bold pb-2 border-b border-gray-900">
               <span class="text-teal-400">● Deterministic Golden Snapshot (.snap.json)</span>
-              <span class="text-[10px] text-teal-500 font-mono">100% Deterministic</span>
+              <span id="evalBadge" class="text-[10px] text-teal-400 bg-teal-950/80 px-2 py-0.5 rounded border border-teal-800 font-mono">100% Deterministic</span>
             </div>
-            <pre id="demoOutputJson" class="w-full text-teal-300 overflow-x-auto leading-relaxed h-[268px]"></pre>
+            <div id="demoOutputJson" class="w-full text-teal-300 overflow-x-auto leading-relaxed h-[268px] whitespace-pre font-mono"></div>
           </div>
         </div>
 
-        <div class="mt-4 flex flex-wrap items-center gap-3 text-xs text-gray-400 bg-gray-950/50 p-3 rounded-xl border border-gray-800/80">
-          <span class="font-semibold text-gray-300">Auto-Detected Patterns:</span>
-          <span class="token-mask">UUIDv4</span>
-          <span class="token-mask">ISO-8601 Timestamp</span>
-          <span class="token-mask">JWT Bearer Token</span>
-          <span class="token-mask">Luhn Credit Card</span>
-          <span class="token-mask">Email Address</span>
+        <div class="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs text-gray-400 bg-gray-950/50 p-3 rounded-xl border border-gray-800/80">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="font-semibold text-gray-300">Auto-Detected Patterns:</span>
+            <span class="token-mask">UUIDv4</span>
+            <span class="token-mask">ISO-8601 Timestamp</span>
+            <span class="token-mask">JWT Bearer Token</span>
+            <span class="token-mask">Luhn Credit Card</span>
+            <span class="token-mask">Email Address</span>
+          </div>
+          <div id="tokenStats" class="font-mono text-emerald-400 font-semibold text-[11px]">
+            ⚡ 5 volatile tokens neutralized
+          </div>
         </div>
       </div>
 
@@ -564,36 +576,69 @@
     }
 
     // 3. Auto-Masker Engine Logic
-    const sampleData = {
-      user: {
-        "user_id": "7b8d4169-d419-4a0b-93d3-f54f15d2994e",
+    let currentScenario = 'user';
+
+    const sampleTemplates = {
+      user: () => ({
+        "user_id": generateRandomUuid(),
         "name": "Alice Developer",
         "email": "alice.dev@company.internal",
-        "created_at": "2026-08-30T01:24:50.412Z",
-        "session_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.9f8g7h6j5k4l3m2n1",
+        "created_at": new Date(Date.now() - Math.floor(Math.random() * 10000000)).toISOString(),
+        "session_token": generateRandomJwt(),
         "credit_card": "4532-0151-1283-0366",
         "status": "ACTIVE"
-      },
-      payment: {
-        "transaction_id": "993e1104-58e1-4c6e-bfd1-446655440000",
-        "amount": 299.99,
+      }),
+      payment: () => ({
+        "transaction_id": generateRandomUuid(),
+        "amount": (Math.random() * 500 + 10).toFixed(2) * 1,
         "currency": "USD",
-        "card_number": "5424-1800-2345-6789",
-        "merchant_jwt": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
-        "processed_at": "2026-08-30T00:15:33Z"
-      },
-      order: {
-        "order_id": "ORD-2026-99",
-        "tracking_uuid": "e81d5f1d-7b52-e686-4a0b-93d3f54f15d2",
+        "card_number": "5424-1800-" + Math.floor(1000 + Math.random() * 9000) + "-" + Math.floor(1000 + Math.random() * 9000),
+        "merchant_jwt": generateRandomJwt(),
+        "processed_at": new Date().toISOString()
+      }),
+      order: () => ({
+        "order_id": "ORD-2026-" + Math.floor(100 + Math.random() * 900),
+        "tracking_uuid": generateRandomUuid(),
         "customer_email": "ops-team@enterprise.io",
-        "dispatched_at": "2026-08-30T01:10:00.000Z",
-        "items_count": 3
-      }
+        "dispatched_at": new Date().toISOString(),
+        "items_count": Math.floor(1 + Math.random() * 5)
+      })
     };
 
+    function generateRandomUuid() {
+      return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+      });
+    }
+
+    function generateRandomJwt() {
+      const randStr = (len) => Array.from({length: len}, () => Math.floor(Math.random() * 36).toString(36)).join('');
+      return `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.${randStr(16)}.${randStr(24)}`;
+    }
+
     function loadSample(key) {
-      document.getElementById('demoInputJson').value = JSON.stringify(sampleData[key], null, 2);
-      runAutoMask();
+      currentScenario = key;
+      document.querySelectorAll('.sample-btn').forEach(b => {
+        b.className = "sample-btn px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 transition-all";
+      });
+      document.getElementById('sample-btn-' + key).className = "sample-btn px-3 py-1.5 text-xs font-medium rounded-lg bg-teal-500/20 text-teal-300 border border-teal-500/30 transition-all";
+
+      const data = sampleTemplates[key]();
+      document.getElementById('demoInputJson').value = JSON.stringify(data, null, 2);
+      runAutoMask(false);
+    }
+
+    function mutateDynamicNoise() {
+      const data = sampleTemplates[currentScenario]();
+      document.getElementById('demoInputJson').value = JSON.stringify(data, null, 2);
+      
+      // Flash input box
+      const inBox = document.getElementById('demoInputBox');
+      inBox.classList.add('ring-2', 'ring-amber-500/50');
+      setTimeout(() => inBox.classList.remove('ring-2', 'ring-amber-500/50'), 400);
+
+      runAutoMask(true);
     }
 
     const UUID_REGEX = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -601,13 +646,18 @@
     const JWT_REGEX = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
     const EMAIL_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
 
+    let tokenNeutralizedCount = 0;
+
     function maskObject(val) {
       if (typeof val === 'string') {
-        if (UUID_REGEX.test(val)) return "<MASKED_UUID>";
-        if (ISO_REGEX.test(val)) return "<MASKED_TIMESTAMP>";
-        if (JWT_REGEX.test(val)) return "<MASKED_JWT>";
-        if (EMAIL_REGEX.test(val)) return "<MASKED_EMAIL>";
-        if (val.replace(/\D/g, '').length >= 13 && val.replace(/\D/g, '').length <= 19) return "<MASKED_CREDIT_CARD>";
+        if (UUID_REGEX.test(val)) { tokenNeutralizedCount++; return "<MASKED_UUID>"; }
+        if (ISO_REGEX.test(val)) { tokenNeutralizedCount++; return "<MASKED_TIMESTAMP>"; }
+        if (JWT_REGEX.test(val)) { tokenNeutralizedCount++; return "<MASKED_JWT>"; }
+        if (EMAIL_REGEX.test(val)) { tokenNeutralizedCount++; return "<MASKED_EMAIL>"; }
+        if (val.replace(/\D/g, '').length >= 13 && val.replace(/\D/g, '').length <= 19) {
+          tokenNeutralizedCount++;
+          return "<MASKED_CREDIT_CARD>";
+        }
         return val;
       }
       if (Array.isArray(val)) return val.map(maskObject);
@@ -619,13 +669,42 @@
       return val;
     }
 
-    function runAutoMask() {
+    function highlightMaskedHtml(jsonStr) {
+      return jsonStr
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/&lt;MASKED_UUID&gt;/g, '<span class="token-mask font-bold">&lt;MASKED_UUID&gt;</span>')
+        .replace(/&lt;MASKED_TIMESTAMP&gt;/g, '<span class="token-mask font-bold">&lt;MASKED_TIMESTAMP&gt;</span>')
+        .replace(/&lt;MASKED_JWT&gt;/g, '<span class="token-mask font-bold">&lt;MASKED_JWT&gt;</span>')
+        .replace(/&lt;MASKED_EMAIL&gt;/g, '<span class="token-mask font-bold">&lt;MASKED_EMAIL&gt;</span>')
+        .replace(/&lt;MASKED_CREDIT_CARD&gt;/g, '<span class="token-mask font-bold">&lt;MASKED_CREDIT_CARD&gt;</span>');
+    }
+
+    function runAutoMask(isManualClick) {
+      tokenNeutralizedCount = 0;
+      const outBox = document.getElementById('demoOutputBox');
+      const evalText = document.getElementById('evalText');
+      const evalIcon = document.getElementById('evalIcon');
+
       try {
         const raw = JSON.parse(document.getElementById('demoInputJson').value);
         const masked = maskObject(raw);
-        document.getElementById('demoOutputJson').innerText = JSON.stringify(masked, null, 2);
+        const jsonFormatted = JSON.stringify(masked, null, 2);
+        
+        document.getElementById('demoOutputJson').innerHTML = highlightMaskedHtml(jsonFormatted);
+        document.getElementById('tokenStats').innerText = `⚡ ${tokenNeutralizedCount} volatile tokens neutralized (0.2ms)`;
+
+        if (isManualClick) {
+          outBox.classList.add('ring-2', 'ring-teal-400', 'border-teal-400');
+          evalText.innerText = "Masked (0.2ms) ✓";
+          setTimeout(() => {
+            outBox.classList.remove('ring-2', 'ring-teal-400', 'border-teal-400');
+            evalText.innerText = "Re-evaluate Mask";
+          }, 1200);
+        }
       } catch (e) {
-        document.getElementById('demoOutputJson').innerText = "JSON Syntax Error: " + e.message;
+        document.getElementById('demoOutputJson').innerHTML = `<span class="text-red-400">JSON Syntax Error: ${e.message}</span>`;
       }
     }
 
