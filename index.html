@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ApiSnap - High-Performance API Snapshot Regression Testing Engine</title>
+  <meta name="description" content="Sub-millisecond AST regression testing, deterministic auto-masking, Merkle CAS deduplication, Cranelift JIT rule engine, eBPF sniffing, and Proxy-Wasm shadow differ for Rust/Go/Node/Python." />
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#ecfeff',
+              500: '#06b6d4',
+              600: '#0891b2',
+              900: '#164e63',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,600;0,700;1,400&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <style>
+    body { font-family: 'Plus Jakarta Sans', sans-serif; }
+    pre, code, .font-mono { font-family: 'JetBrains Mono', monospace; }
+    .gradient-glow {
+      background: radial-gradient(circle at 50% 20%, rgba(6, 182, 212, 0.18) 0%, rgba(15, 23, 42, 0) 70%);
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen selection:bg-cyan-500 selection:text-slate-950">
+
+  <!-- Glow Background -->
+  <div class="fixed inset-0 pointer-events-none gradient-glow z-0"></div>
+
+  <!-- Navigation -->
+  <header class="relative z-10 border-b border-slate-800/80 backdrop-blur-md sticky top-0 bg-slate-950/80">
+    <div class="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+      <div class="flex items-center space-x-3">
+        <div class="w-8 h-8 rounded-lg bg-gradient-to-tr from-cyan-500 to-blue-600 flex items-center justify-center shadow-lg shadow-cyan-500/20">
+          <span class="font-mono font-bold text-white text-sm">⚡</span>
+        </div>
+        <span class="font-bold text-lg tracking-tight bg-gradient-to-r from-cyan-400 to-blue-500 bg-clip-text text-transparent">ApiSnap</span>
+        <span class="text-xs px-2 py-0.5 rounded-full border border-cyan-500/30 bg-cyan-500/10 text-cyan-400 font-mono">v1.1.0</span>
+      </div>
+
+      <nav class="hidden md:flex items-center space-x-8 text-sm font-medium text-slate-300">
+        <a href="#playground" class="hover:text-cyan-400 transition-colors">Interactive Playground</a>
+        <a href="#architecture" class="hover:text-cyan-400 transition-colors">RFC-002 Architecture</a>
+        <a href="#cli" class="hover:text-cyan-400 transition-colors">CLI Commands</a>
+        <a href="https://github.com/xylt369/apisnap" target="_blank" class="hover:text-white transition-colors flex items-center space-x-1.5 text-cyan-400">
+          <span>GitHub</span>
+          <span>↗</span>
+        </a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- Hero Section -->
+  <main class="relative z-10 max-w-7xl mx-auto px-6 pt-20 pb-16">
+    <div class="text-center max-w-4xl mx-auto space-y-6">
+      <div class="inline-flex items-center space-x-2 px-3 py-1.5 rounded-full border border-slate-800 bg-slate-900/80 text-xs font-mono text-cyan-300">
+        <span class="inline-block w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
+        <span>RFC-002 Industrial Optimization Suite Online</span>
+      </div>
+
+      <h1 class="text-4xl sm:text-6xl font-extrabold tracking-tight text-white leading-tight sm:leading-tight">
+        The High-Performance <br />
+        <span class="bg-gradient-to-r from-cyan-400 via-sky-400 to-blue-500 bg-clip-text text-transparent">API Snapshot Regression</span> Engine
+      </h1>
+
+      <p class="text-lg sm:text-xl text-slate-400 leading-relaxed max-w-3xl mx-auto">
+        Sub-millisecond AST regression testing, deterministic noise auto-masking (UUID, JWT, ISO-8601), Merkle DAG CAS deduplication, Cranelift JIT matching, and eBPF/Proxy-Wasm traffic differ.
+      </p>
+
+      <!-- Quick Install -->
+      <div class="pt-4 flex flex-col sm:flex-row items-center justify-center gap-4">
+        <div class="flex items-center bg-slate-900 border border-slate-800 rounded-xl px-4 py-3 font-mono text-sm shadow-xl w-full sm:w-auto">
+          <span class="text-slate-500 mr-3">$</span>
+          <span class="text-cyan-300 select-all">cargo install apisnap</span>
+          <button onclick="copyCommand()" class="ml-4 text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 px-2.5 py-1 rounded transition-colors" id="copyBtn">Copy</button>
+        </div>
+
+        <a href="https://github.com/xylt369/apisnap" target="_blank" class="w-full sm:w-auto px-6 py-3 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold shadow-lg shadow-cyan-500/25 transition-all text-center">
+          View Repository ⚡
+        </a>
+      </div>
+    </div>
+
+    <!-- Feature Grid -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mt-24">
+      <div class="p-6 rounded-2xl bg-slate-900/60 border border-slate-800/80 backdrop-blur-sm hover:border-cyan-500/50 transition-all">
+        <div class="w-10 h-10 rounded-lg bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 mb-4 font-bold">1</div>
+        <h3 class="font-bold text-lg text-white mb-2">Deterministic Auto-Masking</h3>
+        <p class="text-slate-400 text-sm leading-relaxed">
+          Automatically eliminates volatile non-deterministic noise (UUIDv4, JWT tokens, ISO-8601 timestamps, Luhn credit cards) with sub-nanosecond Cranelift JIT compilation.
+        </p>
+      </div>
+
+      <div class="p-6 rounded-2xl bg-slate-900/60 border border-slate-800/80 backdrop-blur-sm hover:border-cyan-500/50 transition-all">
+        <div class="w-10 h-10 rounded-lg bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 mb-4 font-bold">2</div>
+        <h3 class="font-bold text-lg text-white mb-2">Merkle DAG CAS Storage</h3>
+        <p class="text-slate-400 text-sm leading-relaxed">
+          Content-Addressable Storage (CAS) with BLAKE3 sub-tree structural sharing. Single-field modifications write only O(log N) chunks, achieving ~85% disk space savings.
+        </p>
+      </div>
+
+      <div class="p-6 rounded-2xl bg-slate-900/60 border border-slate-800/80 backdrop-blur-sm hover:border-cyan-500/50 transition-all">
+        <div class="w-10 h-10 rounded-lg bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 mb-4 font-bold">3</div>
+        <h3 class="font-bold text-lg text-white mb-2">eBPF & Proxy-Wasm Differ</h3>
+        <p class="text-slate-400 text-sm leading-relaxed">
+          Zero-overhead Linux eBPF TC kernel sniffing for passive API recording, and Envoy Proxy-Wasm dual-forwarding shadow gateway for line-rate live drift detection.
+        </p>
+      </div>
+    </div>
+
+    <!-- Live Interactive Playground -->
+    <section id="playground" class="mt-28">
+      <div class="border border-slate-800 rounded-2xl bg-slate-900/80 overflow-hidden shadow-2xl">
+        <div class="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/50">
+          <div class="flex items-center space-x-2">
+            <div class="w-3 h-3 rounded-full bg-red-500/80"></div>
+            <div class="w-3 h-3 rounded-full bg-yellow-500/80"></div>
+            <div class="w-3 h-3 rounded-full bg-green-500/80"></div>
+            <span class="text-xs font-mono text-slate-400 ml-2">Interactive Auto-Masker Playground</span>
+          </div>
+          <button onclick="runInteractiveMask()" class="px-3 py-1 bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-xs font-bold rounded-md transition-colors">
+            Run Auto-Mask ⚡
+          </button>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-slate-800 font-mono text-xs">
+          <!-- Input -->
+          <div class="p-6">
+            <div class="text-slate-400 mb-2 font-bold uppercase tracking-wider text-[10px]">Live Dynamic API Response (Input)</div>
+            <textarea id="jsonInput" rows="12" class="w-full bg-slate-950 text-cyan-300 p-4 rounded-xl border border-slate-800 focus:outline-none focus:border-cyan-500 font-mono leading-relaxed resize-none">{
+  "user_id": "550e8400-e29b-41d4-a716-446655440000",
+  "name": "Alice Developer",
+  "created_at": "2026-08-30T01:20:00.123Z",
+  "session_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.t-IDcSemACt8x4iTmc6Y5uvRtErqYQTA-eeOxQDBG7g",
+  "credit_card": "4532-0151-1283-0366",
+  "email": "alice@example.com",
+  "balance": 1500.50
+}</textarea>
+          </div>
+
+          <!-- Output -->
+          <div class="p-6 bg-slate-950/40">
+            <div class="text-slate-400 mb-2 font-bold uppercase tracking-wider text-[10px]">Deterministic Masked Snapshot (Output)</div>
+            <pre id="jsonOutput" class="w-full bg-slate-950 text-emerald-400 p-4 rounded-xl border border-slate-800 font-mono leading-relaxed overflow-x-auto h-[268px]"></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- CLI Showcase -->
+    <section id="cli" class="mt-28">
+      <div class="text-center max-w-2xl mx-auto mb-12">
+        <h2 class="text-3xl font-bold text-white">First-Class CLI Toolchain</h2>
+        <p class="text-slate-400 text-sm mt-2">Zero-boilerplate terminal regression testing commands.</p>
+      </div>
+
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 font-mono text-sm space-y-4 shadow-xl">
+        <div class="text-slate-400 text-xs">// 1. Record baseline golden snapshots</div>
+        <div class="text-cyan-300">$ apisnap record --cas</div>
+        <div class="text-slate-400 text-xs">// 2. Execute CI regression test with zero drift guarantee</div>
+        <div class="text-cyan-300">$ apisnap test --ci --pr-comment</div>
+        <div class="text-slate-400 text-xs">// 3. Run passive kernel eBPF traffic capture</div>
+        <div class="text-cyan-300">$ apisnap sniff --port 8080 --output __snapshots__</div>
+        <div class="text-slate-400 text-xs">// 4. Start Envoy Proxy-Wasm live shadow differ gateway</div>
+        <div class="text-cyan-300">$ apisnap shadow --baseline http://backend:8080 --candidate http://canary:8080</div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Footer -->
+  <footer class="relative z-10 border-t border-slate-800/80 py-10 mt-20 text-center text-xs text-slate-500">
+    <p>ApiSnap &copy; 2026. Distributed under MIT OR Apache-2.0 License.</p>
+    <p class="mt-1">Maintained by <a href="https://github.com/xylt369" class="text-cyan-400 hover:underline">xylt369</a>.</p>
+  </footer>
+
+  <script>
+    function copyCommand() {
+      navigator.clipboard.writeText("cargo install apisnap");
+      const btn = document.getElementById("copyBtn");
+      btn.innerText = "Copied!";
+      setTimeout(() => btn.innerText = "Copy", 2000);
+    }
+
+    const UUID_REGEX = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+    const ISO_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?$/;
+    const JWT_REGEX = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+    const EMAIL_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+
+    function maskNode(val) {
+      if (typeof val === 'string') {
+        if (UUID_REGEX.test(val)) return "<MASKED_UUID>";
+        if (ISO_REGEX.test(val)) return "<MASKED_TIMESTAMP>";
+        if (JWT_REGEX.test(val)) return "<MASKED_JWT>";
+        if (EMAIL_REGEX.test(val)) return "<MASKED_EMAIL>";
+        if (val.replace(/\D/g, '').length >= 13 && val.replace(/\D/g, '').length <= 19) return "<MASKED_CREDIT_CARD>";
+        return val;
+      }
+      if (Array.isArray(val)) return val.map(maskNode);
+      if (val !== null && typeof val === 'object') {
+        const out = {};
+        for (const k in val) out[k] = maskNode(val[k]);
+        return out;
+      }
+      return val;
+    }
+
+    function runInteractiveMask() {
+      try {
+        const raw = JSON.parse(document.getElementById("jsonInput").value);
+        const masked = maskNode(raw);
+        document.getElementById("jsonOutput").innerText = JSON.stringify(masked, null, 2);
+      } catch (e) {
+        document.getElementById("jsonOutput").innerText = "Invalid JSON: " + e.message;
+      }
+    }
+
+    // Auto-run on load
+    runInteractiveMask();
+  </script>
+</body>
+</html>
