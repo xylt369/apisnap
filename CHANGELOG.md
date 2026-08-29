@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.0] - 2026-08-30
+
+### Added
+- **Enterprise Authentication Subsystem (`src/client/auth.rs`)**:
+  - `AuthProvider` trait with asynchronous request enrichment.
+  - **Static Bearer Token (`Bearer`)** and **API Key Header (`ApiKey`)** auth providers.
+  - **HTTP Basic Authentication (`Basic`)** provider.
+  - **OAuth2 Client Credentials Flow (`OAuth2ClientCredentials`)**: Auto-refreshing access tokens with expiry-aware read/write locking (`tokio::sync::RwLock`), preventing credential expirations during test suite execution.
+  - **Per-Endpoint `auth_override`**: Compose distinct auth mechanisms (e.g. internal mTLS vs public OAuth2) within the same test suite.
+- **Bidirectional OpenAPI / Swagger Synchronization Engine (`src/openapi/`)**:
+  - **JSON Schema Inference (`schema_infer.rs`)**: Reconstructs OpenAPI 3.1 types from AST and re-derives format hints from mask tokens (`<MASKED_UUID>` $\to$ `format: uuid`, `<MASKED_TIMESTAMP>` $\to$ `format: date-time`, `<MASKED_EMAIL>` $\to$ `format: email`).
+  - **OpenAPI 3.1 Spec Generator (`apisnap openapi generate`)**: Synthesizes clean `openapi.yaml` from golden snapshots.
+  - **Contract Drift Verifier (`apisnap openapi verify`)**: Compiles and validates recorded snapshot payloads against official OpenAPI schemas with `jsonschema`.
+
+---
+
 ## [0.2.0] - 2026-08-30
 
 ### Added

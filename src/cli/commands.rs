@@ -1,7 +1,9 @@
+use crate::client::auth::{create_auth_provider, AuthProvider};
 use crate::client::{RawResponse, RequestExecutor, ReqwestExecutor};
 use crate::config::{ApiSnapConfig, EndpointConfig};
 use crate::engine::{compare_json_ast, mask_value, DiffOptions, DiffReport, MaskContext};
 use crate::error::ApiSnapError;
+use crate::openapi::{generate_openapi_spec, verify_openapi_spec};
 use crate::snapshot::{SnapshotFile, SnapshotMetadata, SnapshotStore};
 use crate::ui::{print_summary_report, run_interactive_review, ReviewItem};
 use colored::Colorize;
@@ -47,6 +49,11 @@ pub async fn handle_record(
         .with_secret_scan(config.masking.pre_write_secret_scan);
     let executor = Arc::new(ReqwestExecutor::new(config.timeout));
 
+    let global_auth = config
+        .auth
+        .as_ref()
+        .map(|auth_cfg| create_auth_provider(auth_cfg, executor.client()));
+
     let filtered_endpoints: Vec<EndpointConfig> = filter_endpoints(&config.endpoints, endpoint_filter);
     if filtered_endpoints.is_empty() {
         println!("{}", "No matching endpoints found to record.".yellow());
@@ -66,6 +73,7 @@ pub async fn handle_record(
         executor,
         &config.base_url,
         &config.global_headers,
+        global_auth,
         filtered_endpoints,
         concurrency,
         progress.clone(),
@@ -127,6 +135,11 @@ pub async fn handle_test(
         .with_secret_scan(config.masking.pre_write_secret_scan);
     let executor = Arc::new(ReqwestExecutor::new(config.timeout));
 
+    let global_auth = config
+        .auth
+        .as_ref()
+        .map(|auth_cfg| create_auth_provider(auth_cfg, executor.client()));
+
     let filtered_endpoints: Vec<EndpointConfig> = filter_endpoints(&config.endpoints, endpoint_filter);
     if filtered_endpoints.is_empty() {
         println!("{}", "No matching endpoints found to test.".yellow());
@@ -144,6 +157,7 @@ pub async fn handle_test(
         executor,
         &config.base_url,
         &config.global_headers,
+        global_auth,
         filtered_endpoints,
         concurrency,
         progress.clone(),
@@ -165,7 +179,7 @@ pub async fn handle_test(
             .with_max_depth(config.max_depth);
         mask_value(&mut actual_masked, &mask_ctx);
 
-        // 2. Diff against stored snapshot with v0.2.0 tolerance and normalization
+        // 2. Diff against stored snapshot
         let float_epsilon = endpoint.float_epsilon_override.unwrap_or(config.float_epsilon);
         let diff_options = DiffOptions {
             float_epsilon,
@@ -214,6 +228,11 @@ pub async fn handle_review(
         .with_secret_scan(config.masking.pre_write_secret_scan);
     let executor = Arc::new(ReqwestExecutor::new(config.timeout));
 
+    let global_auth = config
+        .auth
+        .as_ref()
+        .map(|auth_cfg| create_auth_provider(auth_cfg, executor.client()));
+
     let filtered_endpoints: Vec<EndpointConfig> = filter_endpoints(&config.endpoints, endpoint_filter);
     if filtered_endpoints.is_empty() {
         println!("{}", "No matching endpoints found to review.".yellow());
@@ -227,6 +246,7 @@ pub async fn handle_review(
         executor,
         &config.base_url,
         &config.global_headers,
+        global_auth,
         filtered_endpoints,
         config.concurrency,
         progress.clone(),
@@ -321,6 +341,57 @@ pub async fn handle_review(
     Ok(())
 }
 
+pub fn handle_openapi_generate(config_path: &str, output_path: &str) -> Result<(), ApiSnapError> {
+    let config = ApiSnapConfig::load_from_file(config_path)?;
+    println!(
+        "\n{} Synthesizing OpenAPI 3.1 schema from snapshots in '{}'...",
+        "ApiSnap".cyan().bold(),
+        config.snapshot_dir.cyan()
+    );
+
+    generate_openapi_spec(&config, output_path)?;
+
+    println!(
+        "{} Successfully generated OpenAPI 3.1 YAML at: {}\n",
+        "[SUCCESS]".green().bold(),
+        output_path.cyan().bold()
+    );
+
+    Ok(())
+}
+
+pub fn handle_openapi_verify(config_path: &str, spec_path: &str) -> Result<(), ApiSnapError> {
+    let config = ApiSnapConfig::load_from_file(config_path)?;
+    println!(
+        "\n{} Verifying snapshots against OpenAPI specification: '{}'...",
+        "ApiSnap".cyan().bold(),
+        spec_path.cyan()
+    );
+
+    let result = verify_openapi_spec(&config, spec_path)?;
+
+    println!(
+        "Checked {} endpoint(s): {} matched, {} contract drift(s).",
+        result.total_endpoints_checked,
+        result.matched_count.to_string().green(),
+        result.drift_count.to_string().red()
+    );
+
+    if result.drift_count > 0 {
+        println!("\n{}", "Detected Schema Contract Drifts:".red().bold());
+        for err in &result.errors {
+            println!("  {} {}", "[DRIFT]".red().bold(), err);
+        }
+        return Err(ApiSnapError::DiffMismatch {
+            endpoint_name: "openapi_verify".into(),
+            diff_count: result.drift_count,
+        });
+    }
+
+    println!("{} All snapshots fully match OpenAPI specification!\n", "[PASS]".green().bold());
+    Ok(())
+}
+
 fn filter_endpoints(
     endpoints: &[EndpointConfig],
     filter: Option<&str>,
@@ -340,6 +411,7 @@ async fn dispatch_requests(
     executor: Arc<dyn RequestExecutor>,
     base_url: &str,
     global_headers: &std::collections::HashMap<String, String>,
+    global_auth: Option<Arc<dyn AuthProvider>>,
     endpoints: Vec<EndpointConfig>,
     concurrency: usize,
     progress: ProgressBar,
@@ -356,9 +428,10 @@ async fn dispatch_requests(
             let exec = Arc::clone(&executor);
             let b_url = base_url.clone();
             let g_headers = global_headers.clone();
+            let g_auth = global_auth.clone();
 
             join_set.spawn(async move {
-                let res = exec.execute(&endpoint, &b_url, &g_headers).await;
+                let res = exec.execute(&endpoint, &b_url, &g_headers, g_auth).await;
                 (endpoint, res)
             });
         }
@@ -373,9 +446,10 @@ async fn dispatch_requests(
                 let exec = Arc::clone(&executor);
                 let b_url = base_url.clone();
                 let g_headers = global_headers.clone();
+                let g_auth = global_auth.clone();
 
                 join_set.spawn(async move {
-                    let res = exec.execute(&next_ep, &b_url, &g_headers).await;
+                    let res = exec.execute(&next_ep, &b_url, &g_headers, g_auth).await;
                     (next_ep, res)
                 });
             }

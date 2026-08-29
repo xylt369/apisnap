@@ -1,47 +1,39 @@
-use apisnap::cli::{handle_init, handle_record, handle_review, handle_test, Cli, Command};
+use apisnap::cli::{
+    handle_init, handle_openapi_generate, handle_openapi_verify, handle_record, handle_review,
+    handle_test, Cli, Commands, OpenApiActions,
+};
+use apisnap::error::ApiSnapError;
 use clap::Parser;
-use colored::Colorize;
-use std::process::ExitCode;
 
 #[tokio::main]
-async fn main() -> ExitCode {
+async fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Command::Init { output } => handle_init(&output),
-        Command::Record {
-            endpoint,
-            concurrency,
-        } => handle_record(&cli.config, endpoint.as_deref(), concurrency).await,
-        Command::Test {
-            endpoint,
-            concurrency,
-            ci,
-        } => handle_test(&cli.config, endpoint.as_deref(), concurrency, ci).await,
-        Command::Review { endpoint } => {
-            handle_review(&cli.config, endpoint.as_deref()).await
+        Commands::Init(args) => handle_init(&args.output),
+        Commands::Record(args) => {
+            handle_record(&args.config, args.endpoint.as_deref(), args.concurrency).await
         }
+        Commands::Test(args) => {
+            handle_test(
+                &args.config,
+                args.endpoint.as_deref(),
+                args.concurrency,
+                args.ci,
+            )
+            .await
+        }
+        Commands::Review(args) => {
+            handle_review(&args.config, args.endpoint.as_deref()).await
+        }
+        Commands::Openapi(sub) => match sub.action {
+            OpenApiActions::Generate(args) => handle_openapi_generate(&args.config, &args.output),
+            OpenApiActions::Verify(args) => handle_openapi_verify(&args.config, &args.spec),
+        },
     };
 
-    match result {
-        Ok(_) => ExitCode::SUCCESS,
-        Err(err) => {
-            let code = err.exit_code();
-            match code {
-                1 => {
-                    // Diff mismatch is already formatted by reporter
-                }
-                2 => {
-                    eprintln!("{} {}", "[NETWORK ERROR]".red().bold(), err);
-                }
-                3 => {
-                    eprintln!("{} {}", "[CONFIG/IO ERROR]".red().bold(), err);
-                }
-                _ => {
-                    eprintln!("{} {}", "[ERROR]".red().bold(), err);
-                }
-            }
-            ExitCode::from(code as u8)
-        }
+    if let Err(err) = result {
+        eprintln!("{err}");
+        std::process::exit(err.exit_code());
     }
 }

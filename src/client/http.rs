@@ -1,3 +1,4 @@
+use crate::client::auth::{create_auth_provider, AuthProvider};
 use crate::config::{EndpointConfig, HttpMethod};
 use crate::error::ApiSnapError;
 use async_trait::async_trait;
@@ -5,6 +6,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Raw response captured from a network dispatch before masking.
@@ -24,6 +26,7 @@ pub trait RequestExecutor: Send + Sync {
         endpoint: &EndpointConfig,
         base_url: &str,
         global_headers: &HashMap<String, String>,
+        global_auth: Option<Arc<dyn AuthProvider>>,
     ) -> Result<RawResponse, ApiSnapError>;
 }
 
@@ -51,7 +54,10 @@ impl ReqwestExecutor {
         }
     }
 
-    /// Constructs a client with a custom root CA for self-signed or staging environments.
+    pub fn client(&self) -> reqwest::Client {
+        self.client.clone()
+    }
+
     pub fn with_custom_tls(
         default_timeout: Duration,
         root_ca_pem: &[u8],
@@ -100,6 +106,7 @@ impl RequestExecutor for ReqwestExecutor {
         endpoint: &EndpointConfig,
         base_url: &str,
         global_headers: &HashMap<String, String>,
+        global_auth: Option<Arc<dyn AuthProvider>>,
     ) -> Result<RawResponse, ApiSnapError> {
         let full_url = build_url(base_url, &endpoint.path, &endpoint.query_params);
 
@@ -115,14 +122,14 @@ impl RequestExecutor for ReqwestExecutor {
 
         let mut req_builder = self.client.request(req_method, &full_url);
 
-        // Set timeout override if present
+        // 1. Timeout
         if let Some(timeout) = endpoint.timeout_override {
             req_builder = req_builder.timeout(timeout);
         } else {
             req_builder = req_builder.timeout(self.default_timeout);
         }
 
-        // Merge global and endpoint headers
+        // 2. Headers
         let mut header_map = HeaderMap::new();
         for (k, v) in global_headers {
             if let (Ok(name), Ok(val)) = (HeaderName::from_str(k), HeaderValue::from_str(v)) {
@@ -136,7 +143,18 @@ impl RequestExecutor for ReqwestExecutor {
         }
         req_builder = req_builder.headers(header_map);
 
-        // Attach request JSON body if present
+        // 3. Authentication: Endpoint override takes precedence over global auth
+        let auth_provider = if let Some(override_cfg) = &endpoint.auth_override {
+            Some(create_auth_provider(override_cfg, self.client.clone()))
+        } else {
+            global_auth
+        };
+
+        if let Some(auth) = auth_provider {
+            req_builder = auth.apply(req_builder).await?;
+        }
+
+        // 4. Body
         if let Some(body_val) = &endpoint.body {
             req_builder = req_builder.json(body_val);
         }
@@ -163,7 +181,6 @@ impl RequestExecutor for ReqwestExecutor {
         let duration_ms = start_time.elapsed().as_millis() as u64;
         let status_code = res.status().as_u16();
 
-        // Extract headers
         let mut response_headers = HashMap::new();
         for (k, v) in res.headers().iter() {
             if let Ok(str_val) = v.to_str() {
@@ -171,7 +188,6 @@ impl RequestExecutor for ReqwestExecutor {
             }
         }
 
-        // Parse JSON body or fallback to string Value
         let body_bytes = res.bytes().await.map_err(|e| ApiSnapError::Network {
             url: full_url.clone(),
             source: e,

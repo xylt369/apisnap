@@ -1,3 +1,4 @@
+use crate::client::AuthConfig;
 use crate::error::ApiSnapError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -29,6 +30,10 @@ pub struct ApiSnapConfig {
     /// Normalize all JSON object keys to Unicode NFC form before comparison.
     #[serde(default = "default_true")]
     pub normalize_unicode_keys: bool,
+
+    /// Global authentication provider configuration.
+    #[serde(default)]
+    pub auth: Option<AuthConfig>,
 
     /// Global headers applied to every request.
     #[serde(default)]
@@ -118,6 +123,9 @@ pub struct EndpointConfig {
     pub float_epsilon_override: Option<f64>,
 
     #[serde(default)]
+    pub auth_override: Option<AuthConfig>,
+
+    #[serde(default)]
     pub mask_overrides: Vec<CustomMaskRule>,
 
     #[serde(default)]
@@ -140,23 +148,18 @@ pub enum ArrayDiffMode {
 /// Global masking behavior toggles and the list of custom rules.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaskingConfig {
-    /// Enable built-in heuristic masking (ISO8601, UUIDv4, JWT, epoch, ObjectId, CreditCard, SSN, Email).
     #[serde(default = "default_true")]
     pub enable_builtin_heuristics: bool,
 
-    /// Enterprise Strict PII Mode: Invert masking to deny by default (redacts all values unless explicitly allowlisted).
     #[serde(default)]
     pub strict_pii_mode: bool,
 
-    /// Explicit JSONPath allowlist for strict PII mode (e.g. ["$.status", "$.data.username"]).
     #[serde(default)]
     pub unmask_allow_list: Vec<String>,
 
-    /// Run pre-write entropy and secret pattern scanning to prevent unmasked credentials from leaking to disk.
     #[serde(default = "default_true")]
     pub pre_write_secret_scan: bool,
 
-    /// Global custom rules, keyed by JSONPath, applied before builtins.
     #[serde(default)]
     pub custom_rules: Vec<CustomMaskRule>,
 }
@@ -219,7 +222,18 @@ snapshot_dir = "__snapshots__"
 
 [global_headers]
 "Accept" = "application/json"
-"User-Agent" = "ApiSnap/0.2.0"
+"User-Agent" = "ApiSnap/0.3.0"
+
+# Optional Enterprise Auth
+# [auth]
+# type = "bearer"
+# token = "secret_token_123"
+
+# [auth]
+# type = "oauth2_client_credentials"
+# token_url = "https://auth.example.com/oauth/token"
+# client_id = "apisnap_client"
+# client_secret = "secret_xyz"
 
 [masking]
 enable_builtin_heuristics = true

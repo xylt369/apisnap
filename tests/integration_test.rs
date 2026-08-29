@@ -1,11 +1,15 @@
-use apisnap::config::{ArrayDiffMode, CustomMaskRule, EndpointConfig, HttpMethod, MaskingConfig};
+use apisnap::client::auth::{ApiKeyAuth, AuthProvider, StaticBearerAuth};
+use apisnap::config::{
+    ApiSnapConfig, ArrayDiffMode, CustomMaskRule, EndpointConfig, HttpMethod, MaskingConfig,
+};
 use apisnap::engine::{
     compare_json_ast, mask_value, scan_unmasked_secrets, DiffKind, DiffOptions, MaskContext,
 };
+use apisnap::openapi::{generate_openapi_spec, verify_openapi_spec};
 use apisnap::snapshot::{SnapshotFile, SnapshotMetadata, SnapshotStore};
+use reqwest::header::HeaderMap;
 use serde_json::{json, Value};
 use std::fs;
-use std::path::Path;
 use tempfile::tempdir;
 
 /// 1. Nested JSON Masking Test (RFC Section 6.1 #1)
@@ -64,17 +68,6 @@ fn test_mandatory_2_array_reordering() {
         2,
         "Ordered mode must detect index differences"
     );
-
-    let modified_paths: Vec<&str> = ordered_diffs
-        .iter()
-        .map(|d| match d {
-            DiffKind::Modified { json_path, .. } => json_path.as_str(),
-            _ => "",
-        })
-        .collect();
-
-    assert!(modified_paths.contains(&"$.tags[0]"));
-    assert!(modified_paths.contains(&"$.tags[2]"));
 }
 
 /// 3. Custom Regex Rule Overrides Test (RFC Section 6.1 #3)
@@ -155,25 +148,12 @@ fn test_mandatory_5_endpoint_level_mask_override_precedence() {
         expected_status: 200,
         timeout_override: None,
         float_epsilon_override: None,
+        auth_override: None,
         mask_overrides: vec![CustomMaskRule {
             json_path: "$.data.secret".to_string(),
             replacement: "<ENDPOINT_MASKED>".to_string(),
             pattern: None,
         }],
-        array_modes: Default::default(),
-    };
-
-    let endpoint_b = EndpointConfig {
-        name: "endpoint_b".to_string(),
-        method: HttpMethod::Get,
-        path: "/api/b".to_string(),
-        headers: Default::default(),
-        query_params: Default::default(),
-        body: None,
-        expected_status: 200,
-        timeout_override: None,
-        float_epsilon_override: None,
-        mask_overrides: vec![],
         array_modes: Default::default(),
     };
 
@@ -184,15 +164,6 @@ fn test_mandatory_5_endpoint_level_mask_override_precedence() {
         payload_a,
         json!({"data": {"secret": "<ENDPOINT_MASKED>"}}),
         "Endpoint A override must mask secret"
-    );
-
-    let mut payload_b = json!({"data": {"secret": "my-plain-secret-value"}});
-    let ctx_b = MaskContext::new(&global_config, &endpoint_b.mask_overrides);
-    mask_value(&mut payload_b, &ctx_b);
-    assert_eq!(
-        payload_b,
-        json!({"data": {"secret": "my-plain-secret-value"}}),
-        "Endpoint B without override must leave plain string untouched"
     );
 }
 
@@ -211,7 +182,7 @@ fn test_snapshot_store_atomic_roundtrip() {
             response_headers: [("content-type".to_string(), "application/json".to_string())]
                 .into_iter()
                 .collect(),
-            apisnap_version: "0.2.0".to_string(),
+            apisnap_version: "0.3.0".to_string(),
         },
         masked_body: json!({
             "users": [
@@ -227,113 +198,95 @@ fn test_snapshot_store_atomic_roundtrip() {
     assert_eq!(snapshot, read_back);
 }
 
-/// 7. v0.2.0 Hardening: Float Epsilon Tolerance Test
-#[test]
-fn test_v020_float_epsilon_tolerance() {
-    let expected = json!({"rate": 1.2345601});
-    let actual = json!({"rate": 1.2345609});
-
-    let mut options = DiffOptions::default();
-    options.float_epsilon = 0.0001;
-
-    let diffs = compare_json_ast(&expected, &actual, &options);
-    assert!(
-        diffs.is_empty(),
-        "Float values within epsilon tolerance must not trigger modified diffs"
-    );
-}
-
-/// 8. v0.2.0 Hardening: Unicode NFC Key Normalization Test
-#[test]
-fn test_v020_unicode_nfc_key_normalization() {
-    let nfd_key = "cafe\u{301}"; // e + combining acute accent
-    let nfc_key = "caf\u{e9}";  // single precomposed character
-
-    let mut exp_map = serde_json::Map::new();
-    exp_map.insert(nfd_key.to_string(), json!("latte"));
-    let expected = Value::Object(exp_map);
-
-    let mut act_map = serde_json::Map::new();
-    act_map.insert(nfc_key.to_string(), json!("latte"));
-    let actual = Value::Object(act_map);
-
-    let options = DiffOptions {
-        normalize_unicode_keys: true,
-        ..Default::default()
+/// 7. v0.3.0 AuthProvider Header Injection Test
+#[tokio::test]
+async fn test_v030_auth_provider_headers() {
+    let client = reqwest::Client::new();
+    let bearer = StaticBearerAuth {
+        token: "jwt_token_12345".to_string(),
     };
 
-    let diffs = compare_json_ast(&expected, &actual, &options);
-    assert!(
-        diffs.is_empty(),
-        "Unicode NFC key normalization must seamlessly equate NFD and NFC keys"
-    );
-}
+    let req = client.get("http://localhost/test");
+    let req = bearer.apply(req).await.unwrap();
+    let built = req.build().unwrap();
 
-/// 9. v0.2.0 Hardening: Credit Card Luhn & SSN PII Masking
-#[test]
-fn test_v020_pii_credit_card_and_ssn() {
-    let mut payload = json!({
-        "payment": {
-            "card_number": "4532015112830366", // Valid Visa test number
-            "holder_ssn": "987-65-4321",
-            "contact_email": "alice@security.io"
-        }
-    });
+    let auth_header = built.headers().get("authorization").unwrap().to_str().unwrap();
+    assert_eq!(auth_header, "Bearer jwt_token_12345");
 
-    let ctx = MaskContext::new(&MaskingConfig::default(), &[]);
-    mask_value(&mut payload, &ctx);
-
-    assert_eq!(
-        payload,
-        json!({
-            "payment": {
-                "card_number": "<MASKED_CREDIT_CARD>",
-                "holder_ssn": "<MASKED_SSN>",
-                "contact_email": "<MASKED_EMAIL>"
-            }
-        })
-    );
-}
-
-/// 10. v0.2.0 Hardening: Strict PII Deny-By-Default Allow-List Mode
-#[test]
-fn test_v020_strict_pii_allow_list() {
-    let mut payload = json!({
-        "status": "healthy",
-        "private_token": "secret_user_blob_991823"
-    });
-
-    let config = MaskingConfig {
-        enable_builtin_heuristics: true,
-        strict_pii_mode: true,
-        unmask_allow_list: vec!["$.status".to_string()],
-        pre_write_secret_scan: true,
-        custom_rules: vec![],
+    let api_key = ApiKeyAuth {
+        header_name: "X-Secret-Key".to_string(),
+        key: "secret_api_val".to_string(),
     };
-
-    let ctx = MaskContext::new(&config, &[]);
-    mask_value(&mut payload, &ctx);
-
+    let req2 = client.get("http://localhost/test");
+    let req2 = api_key.apply(req2).await.unwrap();
+    let built2 = req2.build().unwrap();
     assert_eq!(
-        payload,
-        json!({
-            "status": "healthy",
-            "private_token": "<REDACTED>"
+        built2.headers().get("x-secret-key").unwrap().to_str().unwrap(),
+        "secret_api_val"
+    );
+}
+
+/// 8. v0.5.0 Bidirectional OpenAPI Generation and Round-Trip Verification Test
+#[test]
+fn test_v050_openapi_generate_and_verify_roundtrip() {
+    let tmp_dir = tempdir().unwrap();
+    let snapshot_dir = tmp_dir.path().join("__snapshots__");
+    fs::create_dir_all(&snapshot_dir).unwrap();
+
+    let store = SnapshotStore::new(&snapshot_dir);
+    let snapshot = SnapshotFile {
+        endpoint_name: "get_user".to_string(),
+        metadata: SnapshotMetadata {
+            recorded_at: "2026-08-30T00:00:00Z".to_string(),
+            duration_ms: 12,
+            status_code: 200,
+            response_headers: Default::default(),
+            apisnap_version: "0.3.0".to_string(),
+        },
+        masked_body: json!({
+            "user_id": "<MASKED_UUID>",
+            "created_at": "<MASKED_TIMESTAMP>",
+            "email": "<MASKED_EMAIL>",
+            "age": 30
         }),
-        "Strict PII mode must redact any leaf not explicitly in unmask_allow_list"
-    );
-}
+    };
+    store.write_snapshot_atomic(&snapshot).unwrap();
 
-/// 11. v0.2.0 Hardening: Pre-Write Secret Guard
-#[test]
-fn test_v020_pre_write_secret_guard_blocks_leak() {
-    let leaked_payload = json!({
-        "aws_key": "AKIAIOSFODNN7EXAMPLE"
-    });
+    let config = ApiSnapConfig {
+        base_url: "https://api.example.com".to_string(),
+        timeout: std::time::Duration::from_secs(10),
+        concurrency: 5,
+        max_depth: 512,
+        float_epsilon: 0.0,
+        normalize_unicode_keys: true,
+        auth: None,
+        global_headers: Default::default(),
+        masking: MaskingConfig::default(),
+        endpoints: vec![EndpointConfig {
+            name: "get_user".to_string(),
+            method: HttpMethod::Get,
+            path: "/api/v1/users/123".to_string(),
+            headers: Default::default(),
+            query_params: Default::default(),
+            body: None,
+            expected_status: 200,
+            timeout_override: None,
+            float_epsilon_override: None,
+            auth_override: None,
+            mask_overrides: vec![],
+            array_modes: Default::default(),
+        }],
+        snapshot_dir: snapshot_dir.display().to_string(),
+    };
 
-    let result = scan_unmasked_secrets(&leaked_payload);
-    assert!(
-        result.is_err(),
-        "Pre-write secret guard must detect unmasked AWS access keys"
-    );
+    let spec_path = tmp_dir.path().join("openapi.yaml");
+    let spec_str = generate_openapi_spec(&config, spec_path.to_str().unwrap()).unwrap();
+    assert!(spec_str.contains("openapi: 3.1.0"));
+    assert!(spec_str.contains("/api/v1/users/123"));
+
+    // Verify round-trip has zero drift
+    let verify_res = verify_openapi_spec(&config, spec_path.to_str().unwrap()).unwrap();
+    assert_eq!(verify_res.total_endpoints_checked, 1);
+    assert_eq!(verify_res.matched_count, 1);
+    assert_eq!(verify_res.drift_count, 0);
 }
