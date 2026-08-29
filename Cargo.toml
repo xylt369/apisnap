@@ -32,6 +32,11 @@ unicode-normalization = "0.1"
 bumpalo = "3.16"
 simd-json = "0.14"
 
+# Protobuf & Dynamic gRPC Reflection Engine
+prost = "0.13"
+prost-types = "0.13"
+prost-reflect = { version = "0.14", features = ["serde"] }
+
 # Security & Cryptography (AES-256-GCM At-Rest Encryption)
 aes-gcm = "0.10"
 rand = "0.8"

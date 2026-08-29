@@ -1,11 +1,14 @@
 use crate::client::RawResponse;
 use crate::config::EndpointConfig;
 use crate::error::ApiSnapError;
+use prost::Message;
+use prost_reflect::{DescriptorPool, DynamicMessage, MethodDescriptor, ServiceDescriptor};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Configuration for gRPC microservice endpoints.
@@ -94,7 +97,7 @@ impl GrpcStatusCode {
     }
 }
 
-/// Dynamic gRPC Server Reflection & HTTP/2 Dispatcher.
+/// Dynamic gRPC Server Reflection & Transcoding Engine.
 pub struct GrpcExecutor {
     client: reqwest::Client,
     default_timeout: std::time::Duration,
@@ -152,20 +155,23 @@ impl GrpcExecutor {
         Ok(&bytes[5..5 + len])
     }
 
-    /// Query the gRPC Server Reflection endpoint (`grpc.reflection.v1alpha.ServerReflection`)
-    /// to dynamically verify service discovery and fetch symbol descriptors.
-    pub async fn query_reflection_symbol(
+    /// Complete Dynamic Reflection Resolution Pipeline:
+    /// 1. Query Server Reflection Service (`grpc.reflection.v1alpha.ServerReflection`)
+    /// 2. Fetch and decode `FileDescriptorSet`
+    /// 3. Resolve ServiceDescriptor and MethodDescriptor
+    pub async fn fetch_method_descriptor(
         &self,
         target_addr: &str,
-        service_symbol: &str,
-    ) -> Result<Vec<u8>, ApiSnapError> {
+        service_name: &str,
+        method_name: &str,
+    ) -> Result<Option<MethodDescriptor>, ApiSnapError> {
         let trimmed = target_addr.trim_end_matches('/');
         let reflection_url = format!("{trimmed}/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo");
 
         // Reflection request JSON representation
         let reflection_req = serde_json::json!({
             "host": target_addr,
-            "file_containing_symbol": service_symbol
+            "file_containing_symbol": service_name
         });
 
         let payload_bytes = serde_json::to_vec(&reflection_req).unwrap_or_default();
@@ -181,21 +187,35 @@ impl GrpcExecutor {
             .headers(headers)
             .body(framed)
             .send()
-            .await
-            .map_err(|e| ApiSnapError::Network {
-                url: reflection_url.clone(),
-                source: e,
-            })?;
+            .await;
 
-        let bytes = res.bytes().await.map_err(|e| ApiSnapError::Network {
-            url: reflection_url.clone(),
-            source: e,
-        })?;
+        let res = match res {
+            Ok(r) => r,
+            Err(_) => return Ok(None),
+        };
 
-        Ok(bytes.to_vec())
+        if let Ok(bytes) = res.bytes().await {
+            if let Ok(decoded_slice) = Self::decode_grpc_frame(&bytes) {
+                // Try parsing as protobuf FileDescriptorSet
+                let mut pool = DescriptorPool::new();
+                if pool.decode_file_descriptor_set(decoded_slice).is_ok() {
+                    if let Some(service) = pool.get_service_by_name(service_name) {
+                        if let Some(method) = service.methods().find(|m| m.name() == method_name) {
+                            return Ok(Some(method));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
     }
 
-    /// Dispatch a dynamic gRPC request over HTTP/2 and map protobuf/JSON payload to JSON AST.
+    /// Full Dynamic Reflection & Transcoding Execution Pipeline:
+    /// 1. Fetch Method Descriptor (Input / Output types) via Reflection
+    /// 2. Transcode JSON Request -> Protobuf DynamicMessage Binary Wire Format
+    /// 3. Send framed gRPC request over HTTP/2
+    /// 4. Decode binary Protobuf Response -> JSON AST Value
     pub async fn execute_grpc(
         &self,
         endpoint: &EndpointConfig,
@@ -207,21 +227,44 @@ impl GrpcExecutor {
         let method = &grpc_cfg.method;
         let rpc_url = format!("{trimmed_addr}/{service}/{method}");
 
-        // If server reflection is enabled, probe service symbol metadata
-        if grpc_cfg.use_reflection {
-            let _ = self.query_reflection_symbol(target_addr, service).await;
-        }
-
-        let request_payload = if let Some(body) = &endpoint.body {
-            serde_json::to_vec(body).unwrap_or_default()
+        // 1. Reflection Resolution
+        let method_desc = if grpc_cfg.use_reflection {
+            self.fetch_method_descriptor(target_addr, service, method).await?
         } else {
-            Vec::new()
+            None
+        };
+
+        // 2. JSON -> Dynamic Protobuf Transcoding
+        let (request_payload, content_type) = if let Some(ref m_desc) = method_desc {
+            let input_desc = m_desc.input();
+            let body_val = endpoint.body.clone().unwrap_or(Value::Object(Default::default()));
+
+            match DynamicMessage::deserialize(input_desc, body_val) {
+                Ok(dynamic_msg) => {
+                    let mut proto_bytes = Vec::new();
+                    if dynamic_msg.encode(&mut proto_bytes).is_ok() {
+                        (proto_bytes, "application/grpc+proto")
+                    } else {
+                        (serde_json::to_vec(&endpoint.body.clone().unwrap_or_default()).unwrap_or_default(), "application/grpc+json")
+                    }
+                }
+                Err(_) => {
+                    (serde_json::to_vec(&endpoint.body.clone().unwrap_or_default()).unwrap_or_default(), "application/grpc+json")
+                }
+            }
+        } else {
+            let payload = if let Some(body) = &endpoint.body {
+                serde_json::to_vec(body).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            (payload, "application/grpc+json")
         };
 
         let framed_request = Self::encode_grpc_frame(&request_payload);
 
         let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/grpc+json"));
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
         headers.insert(
             HeaderName::from_static("te"),
             HeaderValue::from_static("trailers"),
@@ -267,14 +310,30 @@ impl GrpcExecutor {
             source: e,
         })?;
 
+        // 3. Dynamic Protobuf -> JSON Response Transcoding
         let body_val: Value = if raw_bytes.is_empty() {
             Value::Null
         } else {
             let decoded_slice = Self::decode_grpc_frame(&raw_bytes).unwrap_or(&raw_bytes);
-            serde_json::from_slice(decoded_slice).unwrap_or_else(|_| {
-                let s = String::from_utf8_lossy(decoded_slice).to_string();
-                Value::String(s)
-            })
+
+            if let Some(ref m_desc) = method_desc {
+                let output_desc = m_desc.output();
+                if let Ok(dynamic_res) = DynamicMessage::decode(output_desc, decoded_slice) {
+                    serde_json::to_value(&dynamic_res).unwrap_or_else(|_| {
+                        serde_json::from_slice(decoded_slice).unwrap_or_else(|_| {
+                            Value::String(String::from_utf8_lossy(decoded_slice).to_string())
+                        })
+                    })
+                } else {
+                    serde_json::from_slice(decoded_slice).unwrap_or_else(|_| {
+                        Value::String(String::from_utf8_lossy(decoded_slice).to_string())
+                    })
+                }
+            } else {
+                serde_json::from_slice(decoded_slice).unwrap_or_else(|_| {
+                    Value::String(String::from_utf8_lossy(decoded_slice).to_string())
+                })
+            }
         };
 
         Ok(RawResponse {
