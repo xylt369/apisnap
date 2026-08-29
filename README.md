@@ -1,4 +1,4 @@
-# 📸 ApiSnap (v1.0.0 GA)
+# 📸 ApiSnap
 
 > **The Jest Snapshot for Backend APIs.**
 >
@@ -6,7 +6,7 @@
 
 ---
 
-## ⚡ Key Superpowers
+## Key Superpowers
 
 - **Zero-SDK Dependency**: Works out-of-the-box with Go, Python, Rust, Node.js, Java, Ruby, PHP, Elixir, and C#.
 - **Deterministic Smart Auto-Masker**: Heuristic auto-sanitization of volatile noise (UUIDv4, ISO-8601 timestamps, JWT tokens, Mongo ObjectIds, Luhn-verified credit cards, SSNs, and emails).
@@ -23,7 +23,7 @@
 
 ---
 
-## 🚀 1-Line Installation
+## 1-Line Installation
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/xylt369/apisnap/main/install.sh | bash
