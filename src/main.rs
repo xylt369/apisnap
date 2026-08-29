@@ -1,6 +1,6 @@
 use apisnap::cli::{
-    handle_init, handle_openapi_generate, handle_openapi_verify, handle_record, handle_review,
-    handle_test, Cli, Commands, OpenApiActions,
+    handle_fuzz, handle_init, handle_openapi_generate, handle_openapi_verify, handle_record,
+    handle_review, handle_test, Cli, Commands, OpenApiActions,
 };
 use apisnap::error::ApiSnapError;
 use clap::Parser;
@@ -20,11 +20,15 @@ async fn main() {
                 args.endpoint.as_deref(),
                 args.concurrency,
                 args.ci,
+                args.pr_comment,
             )
             .await
         }
         Commands::Review(args) => {
             handle_review(&args.config, args.endpoint.as_deref()).await
+        }
+        Commands::Fuzz(args) => {
+            handle_fuzz(&args.config, args.endpoint.as_deref()).await
         }
         Commands::Openapi(sub) => match sub.action {
             OpenApiActions::Generate(args) => handle_openapi_generate(&args.config, &args.output),

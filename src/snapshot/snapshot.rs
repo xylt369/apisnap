@@ -1,3 +1,4 @@
+use crate::crypto::SnapshotEncryptor;
 use crate::engine::scan_unmasked_secrets;
 use crate::error::ApiSnapError;
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,8 @@ pub struct SnapshotMetadata {
     pub duration_ms: u64,
     pub status_code: u16,
     #[serde(default)]
+    pub grpc_status_code: Option<i32>,
+    #[serde(default)]
     pub response_headers: HashMap<String, String>,
     pub apisnap_version: String,
 }
@@ -25,10 +28,11 @@ pub struct SnapshotFile {
     pub masked_body: serde_json::Value,
 }
 
-/// Storage manager for snapshot files with atomic write guarantees and pre-write secret defense.
+/// Storage manager for snapshot files with atomic write guarantees, secret defense, and optional AES-256-GCM encryption.
 pub struct SnapshotStore {
     base_dir: PathBuf,
     pre_write_secret_scan: bool,
+    encryptor: Option<SnapshotEncryptor>,
 }
 
 impl SnapshotStore {
@@ -36,6 +40,7 @@ impl SnapshotStore {
         Self {
             base_dir: base_dir.as_ref().to_path_buf(),
             pre_write_secret_scan: true,
+            encryptor: None,
         }
     }
 
@@ -44,36 +49,67 @@ impl SnapshotStore {
         self
     }
 
+    pub fn with_encryptor(mut self, encryptor: Option<SnapshotEncryptor>) -> Self {
+        self.encryptor = encryptor;
+        self
+    }
+
     pub fn snapshot_path(&self, endpoint_name: &str) -> PathBuf {
         let safe_name = sanitize_filename(endpoint_name);
-        self.base_dir.join(format!("{safe_name}.snap.json"))
+        if self.encryptor.is_some() {
+            self.base_dir.join(format!("{safe_name}.snap.enc"))
+        } else {
+            self.base_dir.join(format!("{safe_name}.snap.json"))
+        }
     }
 
     pub fn exists(&self, endpoint_name: &str) -> bool {
-        self.snapshot_path(endpoint_name).exists()
+        let safe_name = sanitize_filename(endpoint_name);
+        self.base_dir.join(format!("{safe_name}.snap.json")).exists()
+            || self.base_dir.join(format!("{safe_name}.snap.enc")).exists()
     }
 
     pub fn read_snapshot(&self, endpoint_name: &str) -> Result<SnapshotFile, ApiSnapError> {
-        let path = self.snapshot_path(endpoint_name);
-        if !path.exists() {
+        let safe_name = sanitize_filename(endpoint_name);
+        let enc_path = self.base_dir.join(format!("{safe_name}.snap.enc"));
+        let plain_path = self.base_dir.join(format!("{safe_name}.snap.json"));
+
+        let (target_path, is_encrypted) = if enc_path.exists() {
+            (enc_path, true)
+        } else if plain_path.exists() {
+            (plain_path, false)
+        } else {
             return Err(ApiSnapError::SnapshotNotFound {
                 endpoint_name: endpoint_name.to_string(),
-                expected_path: path.display().to_string(),
+                expected_path: plain_path.display().to_string(),
             });
-        }
+        };
 
-        let content = fs::read_to_string(&path).map_err(|e| ApiSnapError::Io {
-            path: path.display().to_string(),
+        let raw_bytes = fs::read(&target_path).map_err(|e| ApiSnapError::Io {
+            path: target_path.display().to_string(),
             source: e,
         })?;
 
-        serde_json::from_str(&content).map_err(|e| ApiSnapError::MalformedJson {
+        let json_bytes = if is_encrypted {
+            if let Some(encryptor) = &self.encryptor {
+                encryptor.decrypt(&raw_bytes)?
+            } else {
+                return Err(ApiSnapError::InvalidConfig {
+                    location: target_path.display().to_string(),
+                    reason: "snapshot is encrypted with AES-256-GCM; please provide APISNAP_MASTER_KEY to read".into(),
+                });
+            }
+        } else {
+            raw_bytes
+        };
+
+        serde_json::from_slice(&json_bytes).map_err(|e| ApiSnapError::MalformedJson {
             context: format!("snapshot file for '{}'", endpoint_name),
             source: e,
         })
     }
 
-    /// Atomically write a snapshot file with pre-write secret defense.
+    /// Atomically write a snapshot file with pre-write secret defense and optional encryption.
     pub fn write_snapshot_atomic(
         &self,
         snapshot: &SnapshotFile,
@@ -96,7 +132,7 @@ impl SnapshotStore {
         }
 
         let final_path = self.snapshot_path(&snapshot.endpoint_name);
-        let tmp_path = final_path.with_extension("snap.json.tmp");
+        let tmp_path = final_path.with_extension("tmp");
 
         let serialized = serde_json::to_string_pretty(snapshot).map_err(|e| {
             ApiSnapError::MalformedJson {
@@ -105,6 +141,12 @@ impl SnapshotStore {
             }
         })?;
 
+        let payload_bytes = if let Some(encryptor) = &self.encryptor {
+            encryptor.encrypt(serialized.as_bytes())?
+        } else {
+            serialized.into_bytes()
+        };
+
         // Write to temporary file and fsync
         {
             let mut file = File::create(&tmp_path).map_err(|e| ApiSnapError::Io {
@@ -112,11 +154,10 @@ impl SnapshotStore {
                 source: e,
             })?;
 
-            file.write_all(serialized.as_bytes())
-                .map_err(|e| ApiSnapError::Io {
-                    path: tmp_path.display().to_string(),
-                    source: e,
-                })?;
+            file.write_all(&payload_bytes).map_err(|e| ApiSnapError::Io {
+                path: tmp_path.display().to_string(),
+                source: e,
+            })?;
 
             file.sync_all().map_err(|e| ApiSnapError::Io {
                 path: tmp_path.display().to_string(),

@@ -1,79 +1,75 @@
-# 📸 ApiSnap
+# 📸 ApiSnap (v1.0.0 GA)
 
-> **Language-Agnostic, Zero-SDK CLI for HTTP & gRPC API Snapshot Regression Testing with Deterministic Auto-Masking.**
-> *"The Jest Snapshot for Backend APIs — Eliminate thousands of handwritten assertion lines."*
-
----
-
-## ⚡ Features
-
-- **Zero-SDK / Zero-Code Dependency**: Works with any backend language (Go, Python, Java, Rust, Node, PHP).
-- **Deterministic Smart Auto-Masking**: Automatically sanitizes dynamic UUIDs, ISO-8601 timestamps, JWT tokens, and Unix epoch timestamps before saving snapshots.
-- **Order-Insensitive Semantic Diffing**: Compares JSON ASTs mathematically (keys as sets), eliminating spurious false-positives from key reordering.
-- **Interactive Review Workflow**: Like `cargo-insta`, review API changes and accept/reject them with a single keystroke (`a`/`r`/`s`/`q`).
-- **Atomic Disk Writes**: Snapshot files (`.snap.json`) are written atomically to avoid corruption on unexpected process crashes.
-- **CI / CD Ready**: Returns standard exit codes (`0` for pass, `1` for diff mismatch, `2` for network errors) and supports `--ci` machine-readable JSON output.
+> **The Jest Snapshot for Backend APIs.**
+>
+> Language-agnostic, zero-SDK CLI written in Rust for deterministic API snapshot regression testing, bidirectional OpenAPI synchronization, smart resilience fuzzing, and CI contract governance.
 
 ---
 
-## 🚀 Quick Start
+## ⚡ Key Superpowers
 
-### 1. Initialize Configuration
+- **Zero-SDK Dependency**: Works out-of-the-box with Go, Python, Rust, Node.js, Java, Ruby, PHP, Elixir, and C#.
+- **Deterministic Smart Auto-Masker**: Heuristic auto-sanitization of volatile noise (UUIDv4, ISO-8601 timestamps, JWT tokens, Mongo ObjectIds, Luhn-verified credit cards, SSNs, and emails).
+- **Semantic AST Differ**: Order-insensitive JSON object key comparison, array Set/Ordered modes, Unicode NFC normalization, and float epsilon tolerance.
+- **100MB+ Large Payload Acceleration**: Powered by `simd-json` AVX2/NEON vector instructions, `bumpalo` arena allocation, and pattern pre-compilation caches.
+- **Bidirectional OpenAPI 3.1 Sync**:
+  - `apisnap openapi generate`: Synthesizes valid OpenAPI 3.1 YAML specifications directly from golden snapshots.
+  - `apisnap openapi verify`: Validates live API responses against existing OpenAPI documentation to detect contract drift.
+- **Smart Resilience Fuzzing (`apisnap fuzz`)**: Boundary mutation engine generating SQLi, XSS, integer overflows, and missing-key variations to uncover HTTP 500 server crashes and stack trace leaks.
+- **Enterprise Security & Encryption at Rest**: AES-256-GCM authenticated encryption (`APISNAP_MASTER_KEY`) and pre-write secret defense scanning.
+- **Enterprise AuthProvider**: Auto-refreshing OAuth2 Client Credentials flow, API Key headers, Bearer tokens, and per-endpoint auth overrides.
+- **Interactive Review TUI**: Single-keystroke interactive review (`a`ccept / `r`eject / `s`kip).
+- **Pro Ecosystem**: Official VS Code Extension (Route CodeLens & Snapshot Explorer), GitHub Action CI Bot, and Next.js Landing Page.
+
+---
+
+## 🚀 1-Line Installation
+
+```bash
+curl -sSL https://raw.githubusercontent.com/xylt369/apisnap/main/install.sh | bash
+```
+
+Or via Cargo:
+```bash
+cargo install apisnap
+```
+
+---
+
+## 🛠️ Quickstart
+
+### 1. Scaffold Configuration
 ```bash
 apisnap init
 ```
-This generates `apisnap.toml` in your project root.
 
-### 2. Configure Endpoints
-```toml
-base_url = "http://localhost:8000"
-timeout = "30s"
-concurrency = 10
-snapshot_dir = "__snapshots__"
-
-[global_headers]
-"Accept" = "application/json"
-"Authorization" = "Bearer token123"
-
-[masking]
-enable_builtin_heuristics = true
-
-[[endpoints]]
-name = "get_user_profile"
-method = "GET"
-path = "/api/v1/users/1"
-expected_status = 200
-
-[[endpoints]]
-name = "create_order"
-method = "POST"
-path = "/api/v1/orders"
-expected_status = 201
-
-[endpoints.body]
-item_id = "SKU-998"
-quantity = 2
-```
-
-### 3. Record Initial Snapshots
+### 2. Record Golden Snapshots
 ```bash
 apisnap record
 ```
-This hits your live/local API, masks volatile fields, and creates readable `.snap.json` files in `__snapshots__/`.
 
-### 4. Run Regression Tests
+### 3. Run Regression Tests in CI
 ```bash
-apisnap test
+apisnap test --ci
 ```
-Runs in $<100\text{ms}$ in your CI/CD pipeline!
 
-### 5. Interactively Review Changes
+### 4. Interactively Review Regressions
 ```bash
 apisnap review
 ```
-Review detected diffs and accept new API shapes with `[a]`.
+
+### 5. Run Smart Resilience Fuzzing
+```bash
+apisnap fuzz
+```
+
+### 6. Bidirectional OpenAPI Generation & Drift Verification
+```bash
+apisnap openapi generate --output openapi.yaml
+apisnap openapi verify --spec openapi.yaml
+```
 
 ---
 
 ## 📄 License
-MIT OR Apache-2.0
+Dual-licensed under [MIT](LICENSE) or [Apache-2.0](LICENSE-APACHE).

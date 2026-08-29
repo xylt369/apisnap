@@ -1,11 +1,13 @@
 use crate::client::auth::{create_auth_provider, AuthProvider};
 use crate::client::{RawResponse, RequestExecutor, ReqwestExecutor};
 use crate::config::{ApiSnapConfig, EndpointConfig};
+use crate::crypto::SnapshotEncryptor;
 use crate::engine::{compare_json_ast, mask_value, DiffOptions, DiffReport, MaskContext};
 use crate::error::ApiSnapError;
+use crate::fuzz::{render_fuzz_report, FuzzEngine};
 use crate::openapi::{generate_openapi_spec, verify_openapi_spec};
 use crate::snapshot::{SnapshotFile, SnapshotMetadata, SnapshotStore};
-use crate::ui::{print_summary_report, run_interactive_review, ReviewItem};
+use crate::ui::{generate_pr_comment_markdown, print_summary_report, run_interactive_review, ReviewItem};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::VecDeque;
@@ -45,8 +47,10 @@ pub async fn handle_record(
     concurrency_override: Option<usize>,
 ) -> Result<(), ApiSnapError> {
     let config = ApiSnapConfig::load_from_file(config_path)?;
+    let encryptor = SnapshotEncryptor::from_env().transpose()?;
     let store = SnapshotStore::new(&config.snapshot_dir)
-        .with_secret_scan(config.masking.pre_write_secret_scan);
+        .with_secret_scan(config.masking.pre_write_secret_scan)
+        .with_encryptor(encryptor);
     let executor = Arc::new(ReqwestExecutor::new(config.timeout));
 
     let global_auth = config
@@ -97,6 +101,7 @@ pub async fn handle_record(
                 recorded_at: chrono::Utc::now().to_rfc3339(),
                 duration_ms: raw_res.duration_ms,
                 status_code: raw_res.status_code,
+                grpc_status_code: None,
                 response_headers: raw_res.headers,
                 apisnap_version: env!("CARGO_PKG_VERSION").to_string(),
             },
@@ -128,11 +133,14 @@ pub async fn handle_test(
     endpoint_filter: Option<&str>,
     concurrency_override: Option<usize>,
     is_ci: bool,
+    pr_comment: bool,
 ) -> Result<(), ApiSnapError> {
     let start_instant = Instant::now();
     let config = ApiSnapConfig::load_from_file(config_path)?;
+    let encryptor = SnapshotEncryptor::from_env().transpose()?;
     let store = SnapshotStore::new(&config.snapshot_dir)
-        .with_secret_scan(config.masking.pre_write_secret_scan);
+        .with_secret_scan(config.masking.pre_write_secret_scan)
+        .with_encryptor(encryptor);
     let executor = Arc::new(ReqwestExecutor::new(config.timeout));
 
     let global_auth = config
@@ -147,7 +155,7 @@ pub async fn handle_test(
     }
 
     let concurrency = concurrency_override.unwrap_or(config.concurrency);
-    let progress = if is_ci {
+    let progress = if is_ci || pr_comment {
         ProgressBar::hidden()
     } else {
         create_progress_bar(filtered_endpoints.len() as u64)
@@ -185,6 +193,7 @@ pub async fn handle_test(
             float_epsilon,
             normalize_unicode_keys: config.normalize_unicode_keys,
             max_depth: config.max_depth,
+            fast_hash_bypass: true,
             array_modes: endpoint.array_modes.clone(),
         };
 
@@ -207,7 +216,13 @@ pub async fn handle_test(
     }
 
     let total_duration = start_instant.elapsed().as_millis() as u64;
-    print_summary_report(&reports, total_duration, is_ci);
+
+    if pr_comment {
+        let comment_md = generate_pr_comment_markdown(&reports, total_duration);
+        println!("{comment_md}");
+    } else {
+        print_summary_report(&reports, total_duration, is_ci);
+    }
 
     if total_mismatches > 0 {
         return Err(ApiSnapError::DiffMismatch {
@@ -224,8 +239,10 @@ pub async fn handle_review(
     endpoint_filter: Option<&str>,
 ) -> Result<(), ApiSnapError> {
     let config = ApiSnapConfig::load_from_file(config_path)?;
+    let encryptor = SnapshotEncryptor::from_env().transpose()?;
     let store = SnapshotStore::new(&config.snapshot_dir)
-        .with_secret_scan(config.masking.pre_write_secret_scan);
+        .with_secret_scan(config.masking.pre_write_secret_scan)
+        .with_encryptor(encryptor);
     let executor = Arc::new(ReqwestExecutor::new(config.timeout));
 
     let global_auth = config
@@ -280,6 +297,7 @@ pub async fn handle_review(
                         recorded_at: "".into(),
                         duration_ms: 0,
                         status_code: endpoint.expected_status,
+                        grpc_status_code: None,
                         response_headers: Default::default(),
                         apisnap_version: env!("CARGO_PKG_VERSION").into(),
                     },
@@ -298,6 +316,7 @@ pub async fn handle_review(
             float_epsilon,
             normalize_unicode_keys: config.normalize_unicode_keys,
             max_depth: config.max_depth,
+            fast_hash_bypass: true,
             array_modes: endpoint.array_modes.clone(),
         };
         let differences = compare_json_ast(&stored_snapshot.masked_body, &actual_masked, &diff_options);
@@ -317,6 +336,7 @@ pub async fn handle_review(
                     recorded_at: chrono::Utc::now().to_rfc3339(),
                     duration_ms: raw_res.duration_ms,
                     status_code: raw_res.status_code,
+                    grpc_status_code: None,
                     response_headers: raw_res.headers,
                     apisnap_version: env!("CARGO_PKG_VERSION").to_string(),
                 },
@@ -338,6 +358,42 @@ pub async fn handle_review(
         });
     }
 
+    Ok(())
+}
+
+pub async fn handle_fuzz(config_path: &str, endpoint_name: Option<&str>) -> Result<(), ApiSnapError> {
+    let config = ApiSnapConfig::load_from_file(config_path)?;
+    let executor = Arc::new(ReqwestExecutor::new(config.timeout));
+    let fuzz_engine = FuzzEngine::new(executor);
+
+    let endpoints: Vec<EndpointConfig> = filter_endpoints(&config.endpoints, endpoint_name);
+    if endpoints.is_empty() {
+        println!("{}", "No endpoints found to fuzz.".yellow());
+        return Ok(());
+    }
+
+    println!(
+        "\n{} Running smart resilience mutation fuzzing on {} endpoint(s)...",
+        "ApiSnap".cyan().bold(),
+        endpoints.len()
+    );
+
+    let mut total_anomalies = 0;
+    for ep in &endpoints {
+        let report = fuzz_engine.run_fuzz(&config, ep).await?;
+        let rendered = render_fuzz_report(&report);
+        print!("{rendered}");
+        total_anomalies += report.anomaly_count;
+    }
+
+    if total_anomalies > 0 {
+        return Err(ApiSnapError::DiffMismatch {
+            endpoint_name: "fuzz_suite".into(),
+            diff_count: total_anomalies,
+        });
+    }
+
+    println!("{} All endpoints proved resilient under boundary mutations!\n", "[PASS]".green().bold());
     Ok(())
 }
 

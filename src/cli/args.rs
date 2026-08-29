@@ -26,6 +26,9 @@ pub enum Commands {
     /// Interactively review snapshot differences in the terminal and accept/reject changes
     Review(ReviewArgs),
 
+    /// Run intelligent boundary fuzzing to detect 500 crashes and unhandled stack trace leaks
+    Fuzz(FuzzArgs),
+
     /// Bidirectional OpenAPI 3.1 synchronization and contract drift verification
     Openapi(OpenApiSubcommand),
 }
@@ -69,6 +72,10 @@ pub struct TestArgs {
     /// Output machine-readable JSON diff report for CI pipelines
     #[arg(long)]
     pub ci: bool,
+
+    /// Output GitHub Actions Pull Request Markdown comment format
+    #[arg(long)]
+    pub pr_comment: bool,
 }
 
 #[derive(Debug, Args)]
@@ -78,6 +85,17 @@ pub struct ReviewArgs {
     pub config: String,
 
     /// Optional name of a single endpoint to review
+    #[arg(short, long)]
+    pub endpoint: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct FuzzArgs {
+    /// Path to apisnap.toml configuration file
+    #[arg(short, long, default_value = "apisnap.toml")]
+    pub config: String,
+
+    /// Name of specific endpoint to fuzz (or all endpoints if omitted)
     #[arg(short, long)]
     pub endpoint: Option<String>,
 }

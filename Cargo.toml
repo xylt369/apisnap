@@ -1,6 +1,6 @@
 [package]
 name = "apisnap"
-version = "0.4.0"
+version = "1.0.0"
 edition = "2021"
 authors = ["ApiSnap Contributors"]
 description = "Language-agnostic API snapshot regression testing CLI with deterministic auto-masking"
@@ -31,6 +31,11 @@ humantime-serde = "1.1"
 unicode-normalization = "0.1"
 bumpalo = "3.16"
 simd-json = "0.14"
+
+# Security & Cryptography (AES-256-GCM At-Rest Encryption)
+aes-gcm = "0.10"
+rand = "0.8"
+hex = "0.4"
 
 # Diffing & Diagnostics
 similar = { version = "2.6", features = ["inline"] }

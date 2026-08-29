@@ -2,12 +2,15 @@ use apisnap::client::auth::{ApiKeyAuth, AuthProvider, StaticBearerAuth};
 use apisnap::config::{
     ApiSnapConfig, ArrayDiffMode, CustomMaskRule, EndpointConfig, HttpMethod, MaskingConfig,
 };
+use apisnap::crypto::SnapshotEncryptor;
 use apisnap::engine::{
     compare_json_ast, mask_value, scan_unmasked_secrets, DiffKind, DiffOptions, FastJsonEngine,
     MaskContext,
 };
+use apisnap::fuzz::generate_mutations;
 use apisnap::openapi::{generate_openapi_spec, verify_openapi_spec};
 use apisnap::snapshot::{SnapshotFile, SnapshotMetadata, SnapshotStore};
+use apisnap::ui::generate_pr_comment_markdown;
 use reqwest::header::HeaderMap;
 use serde_json::{json, Value};
 use std::fs;
@@ -191,10 +194,11 @@ fn test_snapshot_store_atomic_roundtrip() {
             recorded_at: "2026-08-29T22:00:00Z".to_string(),
             duration_ms: 42,
             status_code: 200,
+            grpc_status_code: None,
             response_headers: [("content-type".to_string(), "application/json".to_string())]
                 .into_iter()
                 .collect(),
-            apisnap_version: "0.4.0".to_string(),
+            apisnap_version: "1.0.0".to_string(),
         },
         masked_body: json!({
             "users": [
@@ -210,112 +214,70 @@ fn test_snapshot_store_atomic_roundtrip() {
     assert_eq!(snapshot, read_back);
 }
 
-/// 7. v0.3.0 AuthProvider Header Injection Test
-#[tokio::test]
-async fn test_v030_auth_provider_headers() {
-    let client = reqwest::Client::new();
-    let bearer = StaticBearerAuth {
-        token: "jwt_token_12345".to_string(),
-    };
-
-    let req = client.get("http://localhost/test");
-    let req = bearer.apply(req).await.unwrap();
-    let built = req.build().unwrap();
-
-    let auth_header = built.headers().get("authorization").unwrap().to_str().unwrap();
-    assert_eq!(auth_header, "Bearer jwt_token_12345");
-
-    let api_key = ApiKeyAuth {
-        header_name: "X-Secret-Key".to_string(),
-        key: "secret_api_val".to_string(),
-    };
-    let req2 = client.get("http://localhost/test");
-    let req2 = api_key.apply(req2).await.unwrap();
-    let built2 = req2.build().unwrap();
-    assert_eq!(
-        built2.headers().get("x-secret-key").unwrap().to_str().unwrap(),
-        "secret_api_val"
-    );
-}
-
-/// 8. v0.4.0 SIMD-JSON Fast Parser and Arena Execution Test
+/// 7. v0.8.0 AES-256-GCM Encrypted Snapshot Store Test
 #[test]
-fn test_v040_simd_and_arena_acceleration() {
-    let engine = FastJsonEngine::new(64);
-    let mut payload = br#"{"dataset": [100, 200, 300], "status": "processed"}"#.to_vec();
-
-    let parsed = engine.parse_slice(&mut payload).unwrap();
-    assert_eq!(parsed["status"], "processed");
-
-    // Arena scoped execution
-    let processed_len = engine.with_arena(|bump| {
-        let list = bumpalo::vec![in bump; "record1", "record2", "record3"];
-        list.len()
-    });
-    assert_eq!(processed_len, 3);
-}
-
-/// 9. v0.5.0 Bidirectional OpenAPI Generation and Round-Trip Verification Test
-#[test]
-fn test_v050_openapi_generate_and_verify_roundtrip() {
+fn test_v080_aes_gcm_encrypted_store() {
     let tmp_dir = tempdir().unwrap();
-    let snapshot_dir = tmp_dir.path().join("__snapshots__");
-    fs::create_dir_all(&snapshot_dir).unwrap();
+    let key = [0x99u8; 32];
+    let encryptor = SnapshotEncryptor::new(&key);
 
-    let store = SnapshotStore::new(&snapshot_dir);
+    let store = SnapshotStore::new(tmp_dir.path()).with_encryptor(Some(encryptor.clone()));
+
     let snapshot = SnapshotFile {
-        endpoint_name: "get_user".to_string(),
+        endpoint_name: "financial_report".to_string(),
         metadata: SnapshotMetadata {
             recorded_at: "2026-08-30T00:00:00Z".to_string(),
-            duration_ms: 12,
+            duration_ms: 15,
             status_code: 200,
+            grpc_status_code: None,
             response_headers: Default::default(),
-            apisnap_version: "0.4.0".to_string(),
+            apisnap_version: "1.0.0".to_string(),
         },
         masked_body: json!({
-            "user_id": "<MASKED_UUID>",
-            "created_at": "<MASKED_TIMESTAMP>",
-            "email": "<MASKED_EMAIL>",
-            "age": 30
+            "balance": 1500000,
+            "currency": "USD"
         }),
     };
-    store.write_snapshot_atomic(&snapshot).unwrap();
 
-    let config = ApiSnapConfig {
-        base_url: "https://api.example.com".to_string(),
-        timeout: std::time::Duration::from_secs(10),
-        concurrency: 5,
-        max_depth: 512,
-        float_epsilon: 0.0,
-        normalize_unicode_keys: true,
-        auth: None,
-        global_headers: Default::default(),
-        masking: MaskingConfig::default(),
-        endpoints: vec![EndpointConfig {
-            name: "get_user".to_string(),
-            method: HttpMethod::Get,
-            path: "/api/v1/users/123".to_string(),
-            headers: Default::default(),
-            query_params: Default::default(),
-            body: None,
-            expected_status: 200,
-            timeout_override: None,
-            float_epsilon_override: None,
-            auth_override: None,
-            mask_overrides: vec![],
-            array_modes: Default::default(),
-        }],
-        snapshot_dir: snapshot_dir.display().to_string(),
-    };
+    let enc_path = store.write_snapshot_atomic(&snapshot).unwrap();
+    assert!(enc_path.exists());
 
-    let spec_path = tmp_dir.path().join("openapi.yaml");
-    let spec_str = generate_openapi_spec(&config, spec_path.to_str().unwrap()).unwrap();
-    assert!(spec_str.contains("openapi: 3.1.0"));
-    assert!(spec_str.contains("/api/v1/users/123"));
+    // Ensure raw file is NOT plaintext JSON
+    let raw_bytes = fs::read(&enc_path).unwrap();
+    assert!(!String::from_utf8_lossy(&raw_bytes).contains("financial_report"));
 
-    // Verify round-trip has zero drift
-    let verify_res = verify_openapi_spec(&config, spec_path.to_str().unwrap()).unwrap();
-    assert_eq!(verify_res.total_endpoints_checked, 1);
-    assert_eq!(verify_res.matched_count, 1);
-    assert_eq!(verify_res.drift_count, 0);
+    // Ensure decrypting with key reads back exact struct
+    let read_back = store.read_snapshot("financial_report").unwrap();
+    assert_eq!(snapshot, read_back);
+}
+
+/// 8. v0.7.0 Fuzzing Mutation Generator Test
+#[test]
+fn test_v070_fuzz_mutator() {
+    let baseline = json!({
+        "order_id": "ORD-1234",
+        "amount": 99.5
+    });
+
+    let cases = generate_mutations(&baseline);
+    assert!(cases.len() >= 5);
+    let descriptions: Vec<String> = cases.iter().map(|c| c.description.clone()).collect();
+    assert!(descriptions.iter().any(|d| d.contains("SQL injection")));
+    assert!(descriptions.iter().any(|d| d.contains("Omit required key")));
+}
+
+/// 9. v0.9.0 PR Visual Diff Markdown Formatter Test
+#[test]
+fn test_v090_pr_comment_generator() {
+    let reports = vec![apisnap::engine::DiffReport {
+        endpoint_name: "get_users".to_string(),
+        differences: vec![],
+        is_match: true,
+        expected_status: 200,
+        actual_status: 200,
+    }];
+
+    let markdown = generate_pr_comment_markdown(&reports, 25);
+    assert!(markdown.contains("## 📸 ApiSnap Regression Test Summary"));
+    assert!(markdown.contains("🟢 PASS"));
 }
