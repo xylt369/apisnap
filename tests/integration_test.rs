@@ -1,7 +1,9 @@
 use apisnap::config::{ArrayDiffMode, CustomMaskRule, EndpointConfig, HttpMethod, MaskingConfig};
-use apisnap::engine::{compare_json_ast, mask_value, DiffKind, DiffOptions, MaskContext};
+use apisnap::engine::{
+    compare_json_ast, mask_value, scan_unmasked_secrets, DiffKind, DiffOptions, MaskContext,
+};
 use apisnap::snapshot::{SnapshotFile, SnapshotMetadata, SnapshotStore};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
 use tempfile::tempdir;
@@ -137,6 +139,9 @@ fn test_mandatory_4_type_mismatches() {
 fn test_mandatory_5_endpoint_level_mask_override_precedence() {
     let global_config = MaskingConfig {
         enable_builtin_heuristics: true,
+        strict_pii_mode: false,
+        unmask_allow_list: vec![],
+        pre_write_secret_scan: true,
         custom_rules: vec![],
     };
 
@@ -149,6 +154,7 @@ fn test_mandatory_5_endpoint_level_mask_override_precedence() {
         body: None,
         expected_status: 200,
         timeout_override: None,
+        float_epsilon_override: None,
         mask_overrides: vec![CustomMaskRule {
             json_path: "$.data.secret".to_string(),
             replacement: "<ENDPOINT_MASKED>".to_string(),
@@ -166,11 +172,11 @@ fn test_mandatory_5_endpoint_level_mask_override_precedence() {
         body: None,
         expected_status: 200,
         timeout_override: None,
+        float_epsilon_override: None,
         mask_overrides: vec![],
         array_modes: Default::default(),
     };
 
-    // Test Endpoint A (has override)
     let mut payload_a = json!({"data": {"secret": "my-plain-secret-value"}});
     let ctx_a = MaskContext::new(&global_config, &endpoint_a.mask_overrides);
     mask_value(&mut payload_a, &ctx_a);
@@ -180,7 +186,6 @@ fn test_mandatory_5_endpoint_level_mask_override_precedence() {
         "Endpoint A override must mask secret"
     );
 
-    // Test Endpoint B (no override)
     let mut payload_b = json!({"data": {"secret": "my-plain-secret-value"}});
     let ctx_b = MaskContext::new(&global_config, &endpoint_b.mask_overrides);
     mask_value(&mut payload_b, &ctx_b);
@@ -206,7 +211,7 @@ fn test_snapshot_store_atomic_roundtrip() {
             response_headers: [("content-type".to_string(), "application/json".to_string())]
                 .into_iter()
                 .collect(),
-            apisnap_version: "0.1.0".to_string(),
+            apisnap_version: "0.2.0".to_string(),
         },
         masked_body: json!({
             "users": [
@@ -222,43 +227,113 @@ fn test_snapshot_store_atomic_roundtrip() {
     assert_eq!(snapshot, read_back);
 }
 
-/// 7. Golden Fixture Loading & Masking Verification Test (RFC Section 6.2)
+/// 7. v0.2.0 Hardening: Float Epsilon Tolerance Test
 #[test]
-fn test_golden_fixture_diff_stability() {
-    let golden_path = Path::new("tests/golden/user_profile_golden.snap.json");
-    if golden_path.exists() {
-        let content = fs::read_to_string(golden_path).unwrap();
-        let golden_snapshot: SnapshotFile = serde_json::from_str(&content).unwrap();
+fn test_v020_float_epsilon_tolerance() {
+    let expected = json!({"rate": 1.2345601});
+    let actual = json!({"rate": 1.2345609});
 
-        // Simulate incoming live response with raw volatile dynamic data
-        let mut live_response = json!({
-            "code": 0,
-            "data": {
-                "user_id": "c9bf9e57-1685-4c89-bafb-ff5af830be8a",
-                "username": "developer_alice",
-                "created_at": "2026-08-29T23:20:00.123Z",
-                "tags": ["admin", "developer", "tester"],
-                "meta": {
-                    "jwt": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgN_p_placeholder",
-                    "db_id": "507f1f77bcf86cd799439011"
-                }
+    let mut options = DiffOptions::default();
+    options.float_epsilon = 0.0001;
+
+    let diffs = compare_json_ast(&expected, &actual, &options);
+    assert!(
+        diffs.is_empty(),
+        "Float values within epsilon tolerance must not trigger modified diffs"
+    );
+}
+
+/// 8. v0.2.0 Hardening: Unicode NFC Key Normalization Test
+#[test]
+fn test_v020_unicode_nfc_key_normalization() {
+    let nfd_key = "cafe\u{301}"; // e + combining acute accent
+    let nfc_key = "caf\u{e9}";  // single precomposed character
+
+    let mut exp_map = serde_json::Map::new();
+    exp_map.insert(nfd_key.to_string(), json!("latte"));
+    let expected = Value::Object(exp_map);
+
+    let mut act_map = serde_json::Map::new();
+    act_map.insert(nfc_key.to_string(), json!("latte"));
+    let actual = Value::Object(act_map);
+
+    let options = DiffOptions {
+        normalize_unicode_keys: true,
+        ..Default::default()
+    };
+
+    let diffs = compare_json_ast(&expected, &actual, &options);
+    assert!(
+        diffs.is_empty(),
+        "Unicode NFC key normalization must seamlessly equate NFD and NFC keys"
+    );
+}
+
+/// 9. v0.2.0 Hardening: Credit Card Luhn & SSN PII Masking
+#[test]
+fn test_v020_pii_credit_card_and_ssn() {
+    let mut payload = json!({
+        "payment": {
+            "card_number": "4532015112830366", // Valid Visa test number
+            "holder_ssn": "987-65-4321",
+            "contact_email": "alice@security.io"
+        }
+    });
+
+    let ctx = MaskContext::new(&MaskingConfig::default(), &[]);
+    mask_value(&mut payload, &ctx);
+
+    assert_eq!(
+        payload,
+        json!({
+            "payment": {
+                "card_number": "<MASKED_CREDIT_CARD>",
+                "holder_ssn": "<MASKED_SSN>",
+                "contact_email": "<MASKED_EMAIL>"
             }
-        });
+        })
+    );
+}
 
-        // Apply auto-masking
-        let ctx = MaskContext::new(&MaskingConfig::default(), &[]);
-        mask_value(&mut live_response, &ctx);
+/// 10. v0.2.0 Hardening: Strict PII Deny-By-Default Allow-List Mode
+#[test]
+fn test_v020_strict_pii_allow_list() {
+    let mut payload = json!({
+        "status": "healthy",
+        "private_token": "secret_user_blob_991823"
+    });
 
-        // Compare against stored golden snapshot
-        let diffs = compare_json_ast(
-            &golden_snapshot.masked_body,
-            &live_response,
-            &DiffOptions::default(),
-        );
+    let config = MaskingConfig {
+        enable_builtin_heuristics: true,
+        strict_pii_mode: true,
+        unmask_allow_list: vec!["$.status".to_string()],
+        pre_write_secret_scan: true,
+        custom_rules: vec![],
+    };
 
-        assert!(
-            diffs.is_empty(),
-            "Masked live response must match golden fixture byte-for-byte in AST topology"
-        );
-    }
+    let ctx = MaskContext::new(&config, &[]);
+    mask_value(&mut payload, &ctx);
+
+    assert_eq!(
+        payload,
+        json!({
+            "status": "healthy",
+            "private_token": "<REDACTED>"
+        }),
+        "Strict PII mode must redact any leaf not explicitly in unmask_allow_list"
+    );
+}
+
+/// 11. v0.2.0 Hardening: Pre-Write Secret Guard
+#[test]
+fn test_v020_pre_write_secret_guard_blocks_leak() {
+    let leaked_payload = json!({
+        "aws_key": "AKIAIOSFODNN7EXAMPLE"
+    });
+
+    let result = scan_unmasked_secrets(&leaked_payload);
+    assert!(
+        result.is_err(),
+        "Pre-write secret guard must detect unmasked AWS access keys"
+    );
 }

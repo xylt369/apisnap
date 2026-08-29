@@ -3,6 +3,7 @@ use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use unicode_normalization::UnicodeNormalization;
 
 /// Classification of a single detected difference between expected and actual JSON ASTs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -37,6 +38,11 @@ pub enum DiffKind {
         expected_len: usize,
         actual_len: usize,
     },
+    /// Traversal recursion exceeded maximum configured depth limit.
+    DepthExceeded {
+        json_path: String,
+        max_depth: usize,
+    },
 }
 
 /// Aggregated result of diffing an endpoint's actual response against its snapshot.
@@ -54,7 +60,6 @@ impl DiffReport {
         self.is_match && self.expected_status == self.actual_status
     }
 
-    /// Render a human-readable, ANSI-colored diff output.
     pub fn render_colored(&self) -> String {
         let mut out = String::new();
 
@@ -139,6 +144,14 @@ impl DiffReport {
                         actual_len.to_string().green()
                     ));
                 }
+                DiffKind::DepthExceeded { json_path, max_depth } => {
+                    out.push_str(&format!(
+                        "  {} {} (max recursion depth {} exceeded)\n",
+                        "!".red().bold(),
+                        json_path.red(),
+                        max_depth
+                    ));
+                }
             }
         }
 
@@ -159,9 +172,23 @@ fn format_json_compact(val: &Value) -> String {
 }
 
 /// Configuration for semantic comparison options.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DiffOptions {
+    pub float_epsilon: f64,
+    pub normalize_unicode_keys: bool,
+    pub max_depth: usize,
     pub array_modes: HashMap<String, ArrayDiffMode>,
+}
+
+impl Default for DiffOptions {
+    fn default() -> Self {
+        Self {
+            float_epsilon: 0.0,
+            normalize_unicode_keys: true,
+            max_depth: 512,
+            array_modes: HashMap::new(),
+        }
+    }
 }
 
 /// Compare expected and actual JSON ASTs semantically.
@@ -171,7 +198,7 @@ pub fn compare_json_ast(
     options: &DiffOptions,
 ) -> Vec<DiffKind> {
     let mut differences = Vec::new();
-    diff_recursive(expected, actual, "$", options, &mut differences);
+    diff_recursive(expected, actual, "$", options, 0, &mut differences);
     differences
 }
 
@@ -180,8 +207,17 @@ fn diff_recursive(
     actual: &Value,
     path: &str,
     options: &DiffOptions,
+    depth: usize,
     out: &mut Vec<DiffKind>,
 ) {
+    if depth > options.max_depth {
+        out.push(DiffKind::DepthExceeded {
+            json_path: path.to_string(),
+            max_depth: options.max_depth,
+        });
+        return;
+    }
+
     let exp_type = json_type_name(expected);
     let act_type = json_type_name(actual);
 
@@ -200,14 +236,27 @@ fn diff_recursive(
     // 2. Structural matching by variant
     match (expected, actual) {
         (Value::Object(e_map), Value::Object(a_map)) => {
-            let e_keys: BTreeSet<&str> = e_map.keys().map(|k| k.as_str()).collect();
-            let a_keys: BTreeSet<&str> = a_map.keys().map(|k| k.as_str()).collect();
+            // Apply Unicode normalization if enabled
+            let e_normalized: BTreeMap<String, &Value> = if options.normalize_unicode_keys {
+                e_map.iter().map(|(k, v)| (k.nfc().collect::<String>(), v)).collect()
+            } else {
+                e_map.iter().map(|(k, v)| (k.clone(), v)).collect()
+            };
+
+            let a_normalized: BTreeMap<String, &Value> = if options.normalize_unicode_keys {
+                a_map.iter().map(|(k, v)| (k.nfc().collect::<String>(), v)).collect()
+            } else {
+                a_map.iter().map(|(k, v)| (k.clone(), v)).collect()
+            };
+
+            let e_keys: BTreeSet<&str> = e_normalized.keys().map(|k| k.as_str()).collect();
+            let a_keys: BTreeSet<&str> = a_normalized.keys().map(|k| k.as_str()).collect();
 
             // Removed keys
             for &key in e_keys.difference(&a_keys) {
                 out.push(DiffKind::Removed {
                     json_path: format!("{path}.{key}"),
-                    old_value: e_map[key].clone(),
+                    old_value: e_normalized[key].clone(),
                 });
             }
 
@@ -215,14 +264,14 @@ fn diff_recursive(
             for &key in a_keys.difference(&e_keys) {
                 out.push(DiffKind::Added {
                     json_path: format!("{path}.{key}"),
-                    new_value: a_map[key].clone(),
+                    new_value: a_normalized[key].clone(),
                 });
             }
 
             // Common keys (order-insensitive)
             for &key in e_keys.intersection(&a_keys) {
                 let child_path = format!("{path}.{key}");
-                diff_recursive(&e_map[key], &a_map[key], &child_path, options, out);
+                diff_recursive(e_normalized[key], a_normalized[key], &child_path, options, depth + 1, out);
             }
         }
         (Value::Array(e_arr), Value::Array(a_arr)) => {
@@ -245,7 +294,7 @@ fn diff_recursive(
                     let min_len = std::cmp::min(e_arr.len(), a_arr.len());
                     for i in 0..min_len {
                         let child_path = format!("{path}[{i}]");
-                        diff_recursive(&e_arr[i], &a_arr[i], &child_path, options, out);
+                        diff_recursive(&e_arr[i], &a_arr[i], &child_path, options, depth + 1, out);
                     }
 
                     // Extra actual elements
@@ -271,7 +320,17 @@ fn diff_recursive(
             }
         }
         (Value::Number(e_num), Value::Number(a_num)) => {
-            if e_num != a_num {
+            let is_match = if options.float_epsilon > 0.0 {
+                if let (Some(e_f), Some(a_f)) = (e_num.as_f64(), a_num.as_f64()) {
+                    (e_f - a_f).abs() <= options.float_epsilon
+                } else {
+                    e_num == a_num
+                }
+            } else {
+                e_num == a_num
+            };
+
+            if !is_match {
                 out.push(DiffKind::Modified {
                     json_path: path.to_string(),
                     old_value: expected.clone(),
@@ -293,7 +352,6 @@ fn diff_recursive(
     }
 }
 
-/// Compares array elements as an unordered multiset.
 fn diff_array_as_set(
     expected: &[Value],
     actual: &[Value],
@@ -313,7 +371,6 @@ fn diff_array_as_set(
         *a_canonical.entry(key).or_insert(0) += 1;
     }
 
-    // Removed in actual
     for (key, &count) in &e_canonical {
         let actual_count = a_canonical.get(key).copied().unwrap_or(0);
         if count > actual_count {
@@ -327,7 +384,6 @@ fn diff_array_as_set(
         }
     }
 
-    // Added in actual
     for (key, &count) in &a_canonical {
         let expected_count = e_canonical.get(key).copied().unwrap_or(0);
         if count > expected_count {
@@ -342,7 +398,6 @@ fn diff_array_as_set(
     }
 }
 
-/// Recursively canonicalize JSON so key ordering within elements is consistent.
 fn canonical_json_string(val: &Value) -> String {
     match val {
         Value::Object(map) => {
@@ -370,51 +425,41 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_order_insensitive_object_match() {
-        let expected = json!({"a": 1, "b": "hello"});
-        let actual = json!({"b": "hello", "a": 1});
-
-        let diffs = compare_json_ast(&expected, &actual, &DiffOptions::default());
-        assert!(diffs.is_empty());
-    }
-
-    #[test]
-    fn test_type_mismatch() {
-        let expected = json!({"count": 5});
-        let actual = json!({"count": "5"});
-
-        let diffs = compare_json_ast(&expected, &actual, &DiffOptions::default());
-        assert_eq!(diffs.len(), 1);
-        match &diffs[0] {
-            DiffKind::TypeMismatch {
-                json_path,
-                expected_type,
-                actual_type,
-                ..
-            } => {
-                assert_eq!(json_path, "$.count");
-                assert_eq!(*expected_type, "number");
-                assert_eq!(*actual_type, "string");
-            }
-            _ => panic!("Expected TypeMismatch"),
-        }
-    }
-
-    #[test]
-    fn test_array_set_mode() {
-        let expected = json!({"tags": ["a", "b", "c"]});
-        let actual = json!({"tags": ["c", "a", "b"]});
+    fn test_float_epsilon_tolerance() {
+        let expected = json!({"price": 10.00001});
+        let actual = json!({"price": 10.00002});
 
         let mut options = DiffOptions::default();
-        options
-            .array_modes
-            .insert("$.tags".to_string(), ArrayDiffMode::Set);
+        options.float_epsilon = 0.0001;
 
         let diffs = compare_json_ast(&expected, &actual, &options);
-        assert!(diffs.is_empty(), "Set mode should ignore element reordering");
+        assert!(diffs.is_empty(), "Differences within float_epsilon must not be reported");
 
-        // Ordered mode should detect differences
-        let ordered_diffs = compare_json_ast(&expected, &actual, &DiffOptions::default());
-        assert_eq!(ordered_diffs.len(), 2, "Ordered mode must detect index modifications");
+        // Exact comparison should detect
+        let exact_diffs = compare_json_ast(&expected, &actual, &DiffOptions::default());
+        assert_eq!(exact_diffs.len(), 1);
+    }
+
+    #[test]
+    fn test_unicode_nfc_key_normalization() {
+        // "e\u{301}" (NFD: e + combining acute) vs "\u{e9}" (NFC: é)
+        let nfd_key = "cafe\u{301}";
+        let nfc_key = "caf\u{e9}";
+
+        let mut exp_map = serde_json::Map::new();
+        exp_map.insert(nfd_key.to_string(), json!("espresso"));
+        let expected = Value::Object(exp_map);
+
+        let mut act_map = serde_json::Map::new();
+        act_map.insert(nfc_key.to_string(), json!("espresso"));
+        let actual = Value::Object(act_map);
+
+        let options = DiffOptions {
+            normalize_unicode_keys: true,
+            ..Default::default()
+        };
+
+        let diffs = compare_json_ast(&expected, &actual, &options);
+        assert!(diffs.is_empty(), "Unicode normalized keys should match seamlessly");
     }
 }

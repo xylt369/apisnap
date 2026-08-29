@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.0] - 2026-08-30
+
+### Added
+- **Enterprise Hardening (Milestone v0.2.0)**:
+  - **Recursion Depth Guard (`max_depth = 512`)**: Protects against stack overflow on adversarial or deeply nested JSON payloads.
+  - **Float Epsilon Tolerance (`float_epsilon = 0.0001`)**: Eliminates spurious `Modified` diffs on non-deterministic floating-point serializations.
+  - **Unicode NFC Key Normalization**: Equates decomposed NFD and precomposed NFC JSON object keys seamlessly.
+  - **Enterprise Strict PII Mode (`strict_pii_mode`)**: Deny-by-default redaction model where all leaf data is masked with `<REDACTED>` unless explicitly allowlisted in `unmask_allow_list`.
+  - **High-Confidence PII Detectors**:
+    - Credit Card numbers with **Luhn Checksum Algorithm** (`<MASKED_CREDIT_CARD>`).
+    - US Social Security Numbers (`<MASKED_SSN>`).
+    - Email Addresses (`<MASKED_EMAIL>`).
+  - **Pre-Write Secret Guard**: Final safety barrier scanning the AST for leaked credentials (AWS Access Keys, PEM Private Key Headers) before disk write, preventing git leaks.
+
+---
+
 ## [0.1.0] - 2026-08-29
 
 ### Added

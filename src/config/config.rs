@@ -18,20 +18,30 @@ pub struct ApiSnapConfig {
     #[serde(default = "default_concurrency")]
     pub concurrency: usize,
 
-    /// Global headers applied to every request (e.g. auth tokens), merged
-    /// with (and overridden by) per-endpoint headers.
+    /// Maximum AST traversal depth to prevent stack overflow on adversarial inputs.
+    #[serde(default = "default_max_depth")]
+    pub max_depth: usize,
+
+    /// Float comparison tolerance epsilon. Default: 0.0 (exact).
+    #[serde(default = "default_float_epsilon")]
+    pub float_epsilon: f64,
+
+    /// Normalize all JSON object keys to Unicode NFC form before comparison.
+    #[serde(default = "default_true")]
+    pub normalize_unicode_keys: bool,
+
+    /// Global headers applied to every request.
     #[serde(default)]
     pub global_headers: HashMap<String, String>,
 
-    /// Global masking configuration, applied to every endpoint unless a
-    /// per-endpoint `MaskingConfig` disables inheritance.
+    /// Global masking configuration.
     #[serde(default)]
     pub masking: MaskingConfig,
 
     /// The set of endpoints under test.
     pub endpoints: Vec<EndpointConfig>,
 
-    /// Directory where `.snap.json` files are stored, relative to config file.
+    /// Directory where `.snap.json` files are stored.
     #[serde(default = "default_snapshot_dir")]
     pub snapshot_dir: String,
 }
@@ -42,8 +52,17 @@ fn default_timeout() -> Duration {
 fn default_concurrency() -> usize {
     10
 }
+fn default_max_depth() -> usize {
+    512
+}
+fn default_float_epsilon() -> f64 {
+    0.0
+}
 fn default_snapshot_dir() -> String {
     "__snapshots__".to_string()
+}
+fn default_true() -> bool {
+    true
 }
 
 /// HTTP verbs supported by the dispatcher.
@@ -76,12 +95,8 @@ impl std::fmt::Display for HttpMethod {
 /// Configuration for a single API endpoint under test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EndpointConfig {
-    /// Unique identifier used as the snapshot filename stem.
     pub name: String,
-
     pub method: HttpMethod,
-
-    /// Path appended to `base_url`, may contain `{param}` style placeholders.
     pub path: String,
 
     #[serde(default)]
@@ -90,25 +105,21 @@ pub struct EndpointConfig {
     #[serde(default)]
     pub query_params: HashMap<String, String>,
 
-    /// Raw JSON body, if applicable (POST/PUT/PATCH).
     #[serde(default)]
     pub body: Option<serde_json::Value>,
 
-    /// Expected HTTP status code. If actual differs, this is reported as a
-    /// top-level `DiffKind::TypeMismatch` on JSONPath `$.__status_code`.
     #[serde(default = "default_expected_status")]
     pub expected_status: u16,
 
-    /// Per-endpoint timeout override.
     #[serde(with = "humantime_serde::option", default)]
     pub timeout_override: Option<Duration>,
 
-    /// Endpoint-level masking overrides, merged on top of global masking
-    /// (endpoint rules take precedence on JSONPath collision).
+    #[serde(default)]
+    pub float_epsilon_override: Option<f64>,
+
     #[serde(default)]
     pub mask_overrides: Vec<CustomMaskRule>,
 
-    /// Array comparison modes for specific JSON paths: "ordered" (default) or "set".
     #[serde(default)]
     pub array_modes: HashMap<String, ArrayDiffMode>,
 }
@@ -129,9 +140,21 @@ pub enum ArrayDiffMode {
 /// Global masking behavior toggles and the list of custom rules.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaskingConfig {
-    /// Enable built-in heuristic masking (ISO8601, UUIDv4, JWT, epoch, ObjectId).
+    /// Enable built-in heuristic masking (ISO8601, UUIDv4, JWT, epoch, ObjectId, CreditCard, SSN, Email).
     #[serde(default = "default_true")]
     pub enable_builtin_heuristics: bool,
+
+    /// Enterprise Strict PII Mode: Invert masking to deny by default (redacts all values unless explicitly allowlisted).
+    #[serde(default)]
+    pub strict_pii_mode: bool,
+
+    /// Explicit JSONPath allowlist for strict PII mode (e.g. ["$.status", "$.data.username"]).
+    #[serde(default)]
+    pub unmask_allow_list: Vec<String>,
+
+    /// Run pre-write entropy and secret pattern scanning to prevent unmasked credentials from leaking to disk.
+    #[serde(default = "default_true")]
+    pub pre_write_secret_scan: bool,
 
     /// Global custom rules, keyed by JSONPath, applied before builtins.
     #[serde(default)]
@@ -142,33 +165,24 @@ impl Default for MaskingConfig {
     fn default() -> Self {
         Self {
             enable_builtin_heuristics: true,
+            strict_pii_mode: false,
+            unmask_allow_list: Vec::new(),
+            pre_write_secret_scan: true,
             custom_rules: Vec::new(),
         }
     }
 }
 
-fn default_true() -> bool {
-    true
-}
-
 /// A single explicit masking rule targeting an exact JSONPath.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomMaskRule {
-    /// Exact JSONPath, e.g. "$.data.token" or "$.items[*].id".
     pub json_path: String,
-
-    /// Replacement token written in place of the matched value,
-    /// e.g. "<MASKED_TOKEN>".
     pub replacement: String,
-
-    /// Optional regex; if present, only substrings matching this pattern
-    /// within a string value are replaced (else the whole value is replaced).
     #[serde(default)]
     pub pattern: Option<String>,
 }
 
 impl ApiSnapConfig {
-    /// Load configuration from a TOML or YAML file path.
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, ApiSnapError> {
         let path_ref = path.as_ref();
         let content = std::fs::read_to_string(path_ref).map_err(|e| ApiSnapError::Io {
@@ -193,25 +207,24 @@ impl ApiSnapConfig {
         }
     }
 
-    /// Generate a sample starter configuration.
     pub fn starter_template() -> String {
         r#"# ApiSnap Configuration File
 base_url = "http://localhost:8000"
 timeout = "30s"
 concurrency = 10
+max_depth = 512
+float_epsilon = 0.0001
+normalize_unicode_keys = true
 snapshot_dir = "__snapshots__"
 
 [global_headers]
 "Accept" = "application/json"
-"User-Agent" = "ApiSnap/0.1.0"
+"User-Agent" = "ApiSnap/0.2.0"
 
 [masking]
 enable_builtin_heuristics = true
-
-# Example Global Custom Rule
-# [[masking.custom_rules]]
-# json_path = "$.data.secret_key"
-# replacement = "<MASKED_SECRET>"
+strict_pii_mode = false
+pre_write_secret_scan = true
 
 [[endpoints]]
 name = "get_user_profile"

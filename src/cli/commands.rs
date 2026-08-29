@@ -43,7 +43,8 @@ pub async fn handle_record(
     concurrency_override: Option<usize>,
 ) -> Result<(), ApiSnapError> {
     let config = ApiSnapConfig::load_from_file(config_path)?;
-    let store = SnapshotStore::new(&config.snapshot_dir);
+    let store = SnapshotStore::new(&config.snapshot_dir)
+        .with_secret_scan(config.masking.pre_write_secret_scan);
     let executor = Arc::new(ReqwestExecutor::new(config.timeout));
 
     let filtered_endpoints: Vec<EndpointConfig> = filter_endpoints(&config.endpoints, endpoint_filter);
@@ -78,7 +79,8 @@ pub async fn handle_record(
         let raw_res = raw_res_result?;
         let mut masked_body = raw_res.body.clone();
 
-        let mask_ctx = MaskContext::new(&config.masking, &endpoint.mask_overrides);
+        let mask_ctx = MaskContext::new(&config.masking, &endpoint.mask_overrides)
+            .with_max_depth(config.max_depth);
         mask_value(&mut masked_body, &mask_ctx);
 
         let snapshot = SnapshotFile {
@@ -121,7 +123,8 @@ pub async fn handle_test(
 ) -> Result<(), ApiSnapError> {
     let start_instant = Instant::now();
     let config = ApiSnapConfig::load_from_file(config_path)?;
-    let store = SnapshotStore::new(&config.snapshot_dir);
+    let store = SnapshotStore::new(&config.snapshot_dir)
+        .with_secret_scan(config.masking.pre_write_secret_scan);
     let executor = Arc::new(ReqwestExecutor::new(config.timeout));
 
     let filtered_endpoints: Vec<EndpointConfig> = filter_endpoints(&config.endpoints, endpoint_filter);
@@ -158,13 +161,19 @@ pub async fn handle_test(
 
         // 1. Mask actual live response
         let mut actual_masked = raw_res.body.clone();
-        let mask_ctx = MaskContext::new(&config.masking, &endpoint.mask_overrides);
+        let mask_ctx = MaskContext::new(&config.masking, &endpoint.mask_overrides)
+            .with_max_depth(config.max_depth);
         mask_value(&mut actual_masked, &mask_ctx);
 
-        // 2. Diff against stored snapshot
+        // 2. Diff against stored snapshot with v0.2.0 tolerance and normalization
+        let float_epsilon = endpoint.float_epsilon_override.unwrap_or(config.float_epsilon);
         let diff_options = DiffOptions {
+            float_epsilon,
+            normalize_unicode_keys: config.normalize_unicode_keys,
+            max_depth: config.max_depth,
             array_modes: endpoint.array_modes.clone(),
         };
+
         let differences = compare_json_ast(&stored_snapshot.masked_body, &actual_masked, &diff_options);
         let is_match = differences.is_empty();
 
@@ -201,7 +210,8 @@ pub async fn handle_review(
     endpoint_filter: Option<&str>,
 ) -> Result<(), ApiSnapError> {
     let config = ApiSnapConfig::load_from_file(config_path)?;
-    let store = SnapshotStore::new(&config.snapshot_dir);
+    let store = SnapshotStore::new(&config.snapshot_dir)
+        .with_secret_scan(config.masking.pre_write_secret_scan);
     let executor = Arc::new(ReqwestExecutor::new(config.timeout));
 
     let filtered_endpoints: Vec<EndpointConfig> = filter_endpoints(&config.endpoints, endpoint_filter);
@@ -244,7 +254,6 @@ pub async fn handle_review(
         let stored_snapshot = match store.read_snapshot(&endpoint.name) {
             Ok(snap) => snap,
             Err(_) => {
-                // If snapshot does not exist, treat as empty for first record
                 SnapshotFile {
                     endpoint_name: endpoint.name.clone(),
                     metadata: SnapshotMetadata {
@@ -260,10 +269,15 @@ pub async fn handle_review(
         };
 
         let mut actual_masked = raw_res.body.clone();
-        let mask_ctx = MaskContext::new(&config.masking, &endpoint.mask_overrides);
+        let mask_ctx = MaskContext::new(&config.masking, &endpoint.mask_overrides)
+            .with_max_depth(config.max_depth);
         mask_value(&mut actual_masked, &mask_ctx);
 
+        let float_epsilon = endpoint.float_epsilon_override.unwrap_or(config.float_epsilon);
         let diff_options = DiffOptions {
+            float_epsilon,
+            normalize_unicode_keys: config.normalize_unicode_keys,
+            max_depth: config.max_depth,
             array_modes: endpoint.array_modes.clone(),
         };
         let differences = compare_json_ast(&stored_snapshot.masked_body, &actual_masked, &diff_options);
@@ -322,7 +336,6 @@ fn filter_endpoints(
     }
 }
 
-/// Execute requests across endpoints with bounded concurrency window.
 async fn dispatch_requests(
     executor: Arc<dyn RequestExecutor>,
     base_url: &str,
@@ -338,7 +351,6 @@ async fn dispatch_requests(
     let base_url = base_url.to_string();
     let global_headers = global_headers.clone();
 
-    // Fill initial window
     while join_set.len() < concurrency && !queue.is_empty() {
         if let Some(endpoint) = queue.pop_front() {
             let exec = Arc::clone(&executor);
@@ -352,13 +364,11 @@ async fn dispatch_requests(
         }
     }
 
-    // Process tasks and keep pipeline full
     while let Some(join_res) = join_set.join_next().await {
         if let Ok((endpoint, res)) = join_res {
             results.push((endpoint, res));
             progress.inc(1);
 
-            // Refill window
             if let Some(next_ep) = queue.pop_front() {
                 let exec = Arc::clone(&executor);
                 let b_url = base_url.clone();

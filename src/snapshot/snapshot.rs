@@ -1,3 +1,4 @@
+use crate::engine::scan_unmasked_secrets;
 use crate::error::ApiSnapError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -8,59 +9,50 @@ use std::path::{Path, PathBuf};
 /// Metadata captured alongside a snapshot's masked body.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SnapshotMetadata {
-    /// RFC3339 timestamp of when this snapshot was recorded.
     pub recorded_at: String,
-
-    /// Wall-clock duration of the request that produced this snapshot.
     pub duration_ms: u64,
-
     pub status_code: u16,
-
-    /// Response headers, with values masked via the same masking engine.
     #[serde(default)]
     pub response_headers: HashMap<String, String>,
-
-    /// Semver of the apisnap binary that recorded this snapshot, used to
-    /// detect format drift on load.
     pub apisnap_version: String,
 }
 
 /// The exact on-disk schema of a `.snap.json` file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SnapshotFile {
-    /// Matches `EndpointConfig::name`.
     pub endpoint_name: String,
-
     pub metadata: SnapshotMetadata,
-
-    /// The masked response body AST, stored verbatim as `serde_json::Value`.
     pub masked_body: serde_json::Value,
 }
 
-/// Storage manager for snapshot files with atomic write guarantees.
+/// Storage manager for snapshot files with atomic write guarantees and pre-write secret defense.
 pub struct SnapshotStore {
     base_dir: PathBuf,
+    pre_write_secret_scan: bool,
 }
 
 impl SnapshotStore {
     pub fn new<P: AsRef<Path>>(base_dir: P) -> Self {
         Self {
             base_dir: base_dir.as_ref().to_path_buf(),
+            pre_write_secret_scan: true,
         }
     }
 
-    /// Compute the path for a given endpoint's snapshot file.
+    pub fn with_secret_scan(mut self, enabled: bool) -> Self {
+        self.pre_write_secret_scan = enabled;
+        self
+    }
+
     pub fn snapshot_path(&self, endpoint_name: &str) -> PathBuf {
         let safe_name = sanitize_filename(endpoint_name);
         self.base_dir.join(format!("{safe_name}.snap.json"))
     }
 
-    /// Check if a snapshot exists for an endpoint.
     pub fn exists(&self, endpoint_name: &str) -> bool {
         self.snapshot_path(endpoint_name).exists()
     }
 
-    /// Read and deserialize a snapshot file from disk.
     pub fn read_snapshot(&self, endpoint_name: &str) -> Result<SnapshotFile, ApiSnapError> {
         let path = self.snapshot_path(endpoint_name);
         if !path.exists() {
@@ -81,11 +73,21 @@ impl SnapshotStore {
         })
     }
 
-    /// Atomically write a snapshot file using a temporary sibling file and rename.
+    /// Atomically write a snapshot file with pre-write secret defense.
     pub fn write_snapshot_atomic(
         &self,
         snapshot: &SnapshotFile,
     ) -> Result<PathBuf, ApiSnapError> {
+        // Pre-write defense: scan for leaked credentials
+        if self.pre_write_secret_scan {
+            if let Err(secret_err) = scan_unmasked_secrets(&snapshot.masked_body) {
+                return Err(ApiSnapError::InvalidConfig {
+                    location: format!("snapshot '{}'", snapshot.endpoint_name),
+                    reason: format!("Pre-write secret guard blocked write: {secret_err}"),
+                });
+            }
+        }
+
         if !self.base_dir.exists() {
             fs::create_dir_all(&self.base_dir).map_err(|e| ApiSnapError::Io {
                 path: self.base_dir.display().to_string(),
