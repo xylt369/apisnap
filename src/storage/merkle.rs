@@ -192,7 +192,7 @@ impl MerkleCasStore {
         })
     }
 
-    fn load(&mut self, hash: NodeHash) -> std::io::Result<MerkleNode> {
+    pub fn load(&mut self, hash: NodeHash) -> std::io::Result<MerkleNode> {
         if let Some(n) = self.cache.get(&hash) {
             return Ok(n.clone());
         }

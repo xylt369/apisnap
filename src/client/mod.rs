@@ -5,3 +5,28 @@ pub mod http;
 pub use auth::*;
 pub use grpc::*;
 pub use http::*;
+
+use crate::config::EndpointConfig;
+use crate::error::ApiSnapError;
+use async_trait::async_trait;
+use serde_json::Value;
+use std::collections::HashMap;
+
+#[derive(Debug, Clone)]
+pub struct RawResponse {
+    pub body: Value,
+    pub status_code: u16,
+    pub headers: HashMap<String, String>,
+    pub duration_ms: u64,
+}
+
+#[async_trait]
+pub trait RequestExecutor: Send + Sync {
+    async fn execute(
+        &self,
+        endpoint: &EndpointConfig,
+        base_url: &str,
+        global_headers: &HashMap<String, String>,
+        auth: Option<&dyn auth::AuthProvider>,
+    ) -> Result<RawResponse, ApiSnapError>;
+}

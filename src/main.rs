@@ -2,7 +2,6 @@ use apisnap::cli::{
     handle_fuzz, handle_init, handle_openapi_generate, handle_openapi_verify, handle_record,
     handle_review, handle_test, Cli, Commands, OpenApiActions,
 };
-use apisnap::error::ApiSnapError;
 use clap::Parser;
 
 #[tokio::main]

@@ -435,7 +435,8 @@ pub async fn handle_openapi_verify(
             "ApiSnap".cyan().bold(),
             spec_path.cyan()
         );
-        verify_openapi_live(&config, spec_path).await?
+        let executor = ReqwestExecutor::new(config.timeout);
+        verify_openapi_live(&config, spec_path, &executor).await?
     } else {
         println!(
             "\n{} Verifying recorded snapshots against OpenAPI specification: '{}'...",
@@ -509,12 +510,12 @@ async fn dispatch_requests(
 
             join_set.spawn(async move {
                 let res = match endpoint.protocol {
-                    Protocol::Http => exec.execute(&endpoint, &b_url, &g_headers, g_auth).await,
+                    Protocol::Http => exec.execute(&endpoint, &b_url, &g_headers, g_auth.as_deref()).await,
                     Protocol::Grpc => {
                         if let Some(grpc_cfg) = &endpoint.grpc {
                             grpc_exec.execute_grpc(&endpoint, grpc_cfg, &b_url).await
                         } else {
-                            exec.execute(&endpoint, &b_url, &g_headers, g_auth).await
+                            exec.execute(&endpoint, &b_url, &g_headers, g_auth.as_deref()).await
                         }
                     }
                 };
@@ -537,12 +538,12 @@ async fn dispatch_requests(
 
                 join_set.spawn(async move {
                     let res = match next_ep.protocol {
-                        Protocol::Http => exec.execute(&next_ep, &b_url, &g_headers, g_auth).await,
+                        Protocol::Http => exec.execute(&next_ep, &b_url, &g_headers, g_auth.as_deref()).await,
                         Protocol::Grpc => {
                             if let Some(grpc_cfg) = &next_ep.grpc {
                                 grpc_exec.execute_grpc(&next_ep, grpc_cfg, &b_url).await
                             } else {
-                                exec.execute(&next_ep, &b_url, &g_headers, g_auth).await
+                                exec.execute(&next_ep, &b_url, &g_headers, g_auth.as_deref()).await
                             }
                         }
                     };

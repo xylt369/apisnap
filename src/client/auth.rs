@@ -1,226 +1,215 @@
 use crate::error::ApiSnapError;
 use async_trait::async_trait;
 use reqwest::header::{HeaderName, HeaderValue, AUTHORIZATION};
+use reqwest::RequestBuilder;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
-/// Configuration variants for authentication providers in `apisnap.toml`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Configuration for API authentication.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AuthConfig {
-    Bearer {
-        token: String,
-    },
+    /// Static Bearer token in the `Authorization: Bearer <TOKEN>` header.
+    Bearer { token: String },
+
+    /// API Key passed via header (e.g. `X-API-Key: <VALUE>`).
     ApiKey {
         header_name: String,
-        key: String,
+        api_key: String,
     },
+
+    /// Basic HTTP Authentication (`Authorization: Basic <BASE64>`).
     Basic {
         username: String,
         password: Option<String>,
     },
+
+    /// OAuth2 Client Credentials grant with auto-refreshing token cache.
     Oauth2ClientCredentials {
         token_url: String,
         client_id: String,
         client_secret: String,
         #[serde(default)]
         scopes: Vec<String>,
+        #[serde(default)]
+        custom_params: HashMap<String, String>,
     },
 }
 
-/// Abstract authentication provider for enterprise gateway integration.
+/// Abstract authentication provider for decorating outgoing requests.
 #[async_trait]
 pub trait AuthProvider: Send + Sync {
-    async fn apply(
-        &self,
-        builder: reqwest::RequestBuilder,
-    ) -> Result<reqwest::RequestBuilder, ApiSnapError>;
+    /// Mutate and return the request builder with appropriate auth headers applied.
+    async fn apply(&self, builder: RequestBuilder) -> Result<RequestBuilder, ApiSnapError>;
 }
 
-/// Factory function to construct an `AuthProvider` from configuration.
-pub fn create_auth_provider(
-    config: &AuthConfig,
-    client: reqwest::Client,
-) -> Arc<dyn AuthProvider> {
-    match config {
-        AuthConfig::Bearer { token } => Arc::new(StaticBearerAuth {
-            token: token.clone(),
-        }),
-        AuthConfig::ApiKey { header_name, key } => Arc::new(ApiKeyAuth {
-            header_name: header_name.clone(),
-            key: key.clone(),
-        }),
-        AuthConfig::Basic { username, password } => Arc::new(BasicAuth {
-            username: username.clone(),
-            password: password.clone(),
-        }),
-        AuthConfig::Oauth2ClientCredentials {
-            token_url,
-            client_id,
-            client_secret,
-            scopes,
-        } => Arc::new(OAuth2ClientCredentialsAuth::new(
-            client,
-            token_url.clone(),
-            client_id.clone(),
-            client_secret.clone(),
-            scopes.clone(),
-        )),
-    }
-}
-
-/// Static Bearer Token Authentication (`Authorization: Bearer <token>`).
+/// Static Bearer token provider.
 pub struct StaticBearerAuth {
     token: String,
 }
 
-#[async_trait]
-impl AuthProvider for StaticBearerAuth {
-    async fn apply(
-        &self,
-        builder: reqwest::RequestBuilder,
-    ) -> Result<reqwest::RequestBuilder, ApiSnapError> {
-        let auth_val = format!("Bearer {}", self.token);
-        if let Ok(val) = HeaderValue::from_str(&auth_val) {
-            Ok(builder.header(AUTHORIZATION, val))
-        } else {
-            Err(ApiSnapError::InvalidConfig {
-                location: "auth.bearer".into(),
-                reason: "invalid characters in bearer token".into(),
-            })
+impl StaticBearerAuth {
+    pub fn new(token: impl Into<String>) -> Self {
+        Self {
+            token: token.into(),
         }
     }
 }
 
-/// Custom API Key Header Authentication (e.g. `X-API-Key: <key>`).
+#[async_trait]
+impl AuthProvider for StaticBearerAuth {
+    async fn apply(&self, builder: RequestBuilder) -> Result<RequestBuilder, ApiSnapError> {
+        let auth_val = format!("Bearer {}", self.token);
+        let header_val = HeaderValue::from_str(&auth_val).map_err(|e| ApiSnapError::InvalidConfig {
+            location: "auth.bearer.token".into(),
+            reason: format!("invalid header value: {e}"),
+        })?;
+        Ok(builder.header(AUTHORIZATION, header_val))
+    }
+}
+
+/// Header-based API Key provider.
 pub struct ApiKeyAuth {
-    header_name: String,
-    key: String,
+    header_name: HeaderName,
+    api_key: HeaderValue,
+}
+
+impl ApiKeyAuth {
+    pub fn new(header_name: &str, api_key: &str) -> Result<Self, ApiSnapError> {
+        let h_name = HeaderName::from_str(header_name).map_err(|e| ApiSnapError::InvalidConfig {
+            location: "auth.api_key.header_name".into(),
+            reason: format!("invalid header name '{header_name}': {e}"),
+        })?;
+        let h_val = HeaderValue::from_str(api_key).map_err(|e| ApiSnapError::InvalidConfig {
+            location: "auth.api_key.api_key".into(),
+            reason: format!("invalid header value: {e}"),
+        })?;
+        Ok(Self {
+            header_name: h_name,
+            api_key: h_val,
+        })
+    }
 }
 
 #[async_trait]
 impl AuthProvider for ApiKeyAuth {
-    async fn apply(
-        &self,
-        builder: reqwest::RequestBuilder,
-    ) -> Result<reqwest::RequestBuilder, ApiSnapError> {
-        let name = HeaderName::from_str(&self.header_name).map_err(|e| {
-            ApiSnapError::InvalidConfig {
-                location: "auth.api_key.header_name".into(),
-                reason: e.to_string(),
-            }
-        })?;
-        let val = HeaderValue::from_str(&self.key).map_err(|e| {
-            ApiSnapError::InvalidConfig {
-                location: "auth.api_key.key".into(),
-                reason: e.to_string(),
-            }
-        })?;
-        Ok(builder.header(name, val))
+    async fn apply(&self, builder: RequestBuilder) -> Result<RequestBuilder, ApiSnapError> {
+        Ok(builder.header(self.header_name.clone(), self.api_key.clone()))
     }
 }
 
-/// HTTP Basic Authentication (`Authorization: Basic <base64>`).
+/// HTTP Basic Authentication provider.
 pub struct BasicAuth {
     username: String,
     password: Option<String>,
 }
 
+impl BasicAuth {
+    pub fn new(username: impl Into<String>, password: Option<String>) -> Self {
+        Self {
+            username: username.into(),
+            password,
+        }
+    }
+}
+
 #[async_trait]
 impl AuthProvider for BasicAuth {
-    async fn apply(
-        &self,
-        builder: reqwest::RequestBuilder,
-    ) -> Result<reqwest::RequestBuilder, ApiSnapError> {
+    async fn apply(&self, builder: RequestBuilder) -> Result<RequestBuilder, ApiSnapError> {
         Ok(builder.basic_auth(&self.username, self.password.as_deref()))
     }
 }
 
-/// Token cache for OAuth2 Client Credentials flow.
+/// Token cached in memory with expiration tracking.
 #[derive(Debug, Clone)]
 struct TokenCache {
     access_token: String,
     expires_at: Instant,
 }
 
-#[derive(Deserialize)]
-struct OAuth2TokenResponse {
-    access_token: String,
-    #[serde(default = "default_token_expiry")]
-    expires_in: u64,
-}
-
-fn default_token_expiry() -> u64 {
-    3600
-}
-
-/// Self-refreshing OAuth2 Client Credentials Authentication Provider.
+/// Self-refreshing OAuth2 Client Credentials Token Provider.
 pub struct OAuth2ClientCredentialsAuth {
-    client: reqwest::Client,
     token_url: String,
     client_id: String,
     client_secret: String,
     scopes: Vec<String>,
+    custom_params: HashMap<String, String>,
+    client: reqwest::Client,
     cache: Arc<RwLock<Option<TokenCache>>>,
+}
+
+#[derive(Deserialize)]
+struct OAuth2TokenResponse {
+    access_token: String,
+    #[serde(default = "default_expires_in")]
+    expires_in: u64,
+}
+
+fn default_expires_in() -> u64 {
+    3600 // 1 hour default
 }
 
 impl OAuth2ClientCredentialsAuth {
     pub fn new(
-        client: reqwest::Client,
         token_url: String,
         client_id: String,
         client_secret: String,
         scopes: Vec<String>,
+        custom_params: HashMap<String, String>,
+        client: reqwest::Client,
     ) -> Self {
         Self {
-            client,
             token_url,
             client_id,
             client_secret,
             scopes,
+            custom_params,
+            client,
             cache: Arc::new(RwLock::new(None)),
         }
     }
 
     async fn get_valid_token(&self) -> Result<String, ApiSnapError> {
-        // Fast path: read lock check
+        // Fast path: Read lock check
         {
             let read_guard = self.cache.read().await;
             if let Some(cache) = &*read_guard {
-                // Buffer 30 seconds before expiry to avoid edge-race failures
+                // Refresh if expiring within 30 seconds
                 if Instant::now() + Duration::from_secs(30) < cache.expires_at {
                     return Ok(cache.access_token.clone());
                 }
             }
         }
 
-        // Slow path: write lock & fetch fresh token
+        // Slow path: Acquire write lock and fetch new token
         let mut write_guard = self.cache.write().await;
-        // Double check after acquiring write lock
+        // Double-check condition after write lock acquisition
         if let Some(cache) = &*write_guard {
             if Instant::now() + Duration::from_secs(30) < cache.expires_at {
                 return Ok(cache.access_token.clone());
             }
         }
 
-        let mut form_params = vec![
-            ("grant_type", "client_credentials"),
-            ("client_id", &self.client_id),
-            ("client_secret", &self.client_secret),
-        ];
+        let mut form = HashMap::new();
+        form.insert("grant_type", "client_credentials".to_string());
+        form.insert("client_id", self.client_id.clone());
+        form.insert("client_secret", self.client_secret.clone());
 
-        let scope_str = self.scopes.join(" ");
         if !self.scopes.is_empty() {
-            form_params.push(("scope", &scope_str));
+            form.insert("scope", self.scopes.join(" "));
+        }
+        for (k, v) in &self.custom_params {
+            form.insert(k.as_str(), v.clone());
         }
 
         let res = self
             .client
             .post(&self.token_url)
-            .form(&form_params)
+            .form(&form)
             .send()
             .await
             .map_err(|e| ApiSnapError::Network {
@@ -238,9 +227,9 @@ impl OAuth2ClientCredentialsAuth {
         }
 
         let token_data: OAuth2TokenResponse = res.json().await.map_err(|e| {
-            ApiSnapError::MalformedJson {
-                context: "OAuth2 token response".into(),
-                source: e,
+            ApiSnapError::InvalidConfig {
+                location: format!("oauth2.token_response from '{}'", self.token_url),
+                reason: format!("failed to parse token response: {e}"),
             }
         })?;
 
@@ -258,19 +247,47 @@ impl OAuth2ClientCredentialsAuth {
 
 #[async_trait]
 impl AuthProvider for OAuth2ClientCredentialsAuth {
-    async fn apply(
-        &self,
-        builder: reqwest::RequestBuilder,
-    ) -> Result<reqwest::RequestBuilder, ApiSnapError> {
+    async fn apply(&self, builder: RequestBuilder) -> Result<RequestBuilder, ApiSnapError> {
         let token = self.get_valid_token().await?;
         let auth_val = format!("Bearer {token}");
-        if let Ok(val) = HeaderValue::from_str(&auth_val) {
-            Ok(builder.header(AUTHORIZATION, val))
-        } else {
-            Err(ApiSnapError::InvalidConfig {
-                location: "oauth2.token".into(),
-                reason: "invalid header characters in retrieved OAuth2 token".into(),
-            })
+        let header_val = HeaderValue::from_str(&auth_val).map_err(|e| ApiSnapError::InvalidConfig {
+            location: "oauth2.token".into(),
+            reason: format!("invalid token header value: {e}"),
+        })?;
+        Ok(builder.header(AUTHORIZATION, header_val))
+    }
+}
+
+/// Helper function to construct an `AuthProvider` from configuration.
+pub fn create_auth_provider(
+    config: &AuthConfig,
+    client: reqwest::Client,
+) -> Arc<dyn AuthProvider> {
+    match config {
+        AuthConfig::Bearer { token } => Arc::new(StaticBearerAuth::new(token)),
+        AuthConfig::ApiKey {
+            header_name,
+            api_key,
+        } => Arc::new(
+            ApiKeyAuth::new(header_name, api_key)
+                .expect("Failed to initialize API key auth provider"),
+        ),
+        AuthConfig::Basic { username, password } => {
+            Arc::new(BasicAuth::new(username, password.clone()))
         }
+        AuthConfig::Oauth2ClientCredentials {
+            token_url,
+            client_id,
+            client_secret,
+            scopes,
+            custom_params,
+        } => Arc::new(OAuth2ClientCredentialsAuth::new(
+            token_url.clone(),
+            client_id.clone(),
+            client_secret.clone(),
+            scopes.clone(),
+            custom_params.clone(),
+            client,
+        )),
     }
 }

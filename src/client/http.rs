@@ -1,37 +1,17 @@
-use crate::client::auth::{create_auth_provider, AuthProvider};
+use crate::client::auth::AuthProvider;
+use crate::client::{RawResponse, RequestExecutor};
 use crate::config::{EndpointConfig, HttpMethod};
 use crate::engine::FastJsonEngine;
 use crate::error::ApiSnapError;
 use async_trait::async_trait;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Raw response captured from a network dispatch before masking.
-#[derive(Debug, Clone)]
-pub struct RawResponse {
-    pub status_code: u16,
-    pub headers: HashMap<String, String>,
-    pub body: Value,
-    pub duration_ms: u64,
-}
-
-/// Abstraction over the HTTP transport for unit and integration mock testing.
-#[async_trait]
-pub trait RequestExecutor: Send + Sync {
-    async fn execute(
-        &self,
-        endpoint: &EndpointConfig,
-        base_url: &str,
-        global_headers: &HashMap<String, String>,
-        global_auth: Option<Arc<dyn AuthProvider>>,
-    ) -> Result<RawResponse, ApiSnapError>;
-}
-
-/// Production HTTP request dispatcher backed by `reqwest`.
+/// Standard HTTP request executor built on top of `reqwest`.
 #[derive(Clone)]
 pub struct ReqwestExecutor {
     client: reqwest::Client,
@@ -43,12 +23,11 @@ impl ReqwestExecutor {
     pub fn new(default_timeout: Duration) -> Self {
         let client = reqwest::Client::builder()
             .timeout(default_timeout)
-            .pool_max_idle_per_host(20)
             .redirect(reqwest::redirect::Policy::limited(10))
             .gzip(true)
             .brotli(true)
             .build()
-            .expect("failed to construct reqwest client");
+            .expect("Failed to build reqwest HTTP client");
 
         Self {
             client,
@@ -61,10 +40,11 @@ impl ReqwestExecutor {
         self.client.clone()
     }
 
+    /// Construct with custom root CA certificate.
     pub fn with_custom_tls(
-        default_timeout: Duration,
         root_ca_pem: &[u8],
-        client_identity_pem: Option<&[u8]>,
+        _client_identity_pem: Option<&[u8]>,
+        default_timeout: Duration,
     ) -> Result<Self, ApiSnapError> {
         let cert = reqwest::Certificate::from_pem(root_ca_pem).map_err(|e| {
             ApiSnapError::InvalidConfig {
@@ -73,22 +53,12 @@ impl ReqwestExecutor {
             }
         })?;
 
-        let mut builder = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .timeout(default_timeout)
             .add_root_certificate(cert)
             .redirect(reqwest::redirect::Policy::limited(10))
             .gzip(true)
             .brotli(true);
-
-        if let Some(identity_pem) = client_identity_pem {
-            let identity = reqwest::Identity::from_pem(identity_pem).map_err(|e| {
-                ApiSnapError::InvalidConfig {
-                    location: "tls.client_identity".into(),
-                    reason: e.to_string(),
-                }
-            })?;
-            builder = builder.identity(identity);
-        }
 
         let client = builder.build().map_err(|e| ApiSnapError::InvalidConfig {
             location: "tls.client_builder".into(),
@@ -101,6 +71,22 @@ impl ReqwestExecutor {
             fast_engine: Arc::new(FastJsonEngine::default()),
         })
     }
+
+    fn resolve_url(&self, base_url: &str, path: &str) -> String {
+        if path.starts_with("http://") || path.starts_with("https://") {
+            path.to_string()
+        } else {
+            let base = base_url.trim_end_matches('/');
+            let sub = path.trim_start_matches('/');
+            format!("{base}/{sub}")
+        }
+    }
+}
+
+impl Default for ReqwestExecutor {
+    fn default() -> Self {
+        Self::new(Duration::from_secs(30))
+    }
 }
 
 #[async_trait]
@@ -110,134 +96,134 @@ impl RequestExecutor for ReqwestExecutor {
         endpoint: &EndpointConfig,
         base_url: &str,
         global_headers: &HashMap<String, String>,
-        global_auth: Option<Arc<dyn AuthProvider>>,
+        auth: Option<&dyn AuthProvider>,
     ) -> Result<RawResponse, ApiSnapError> {
-        let full_url = build_url(base_url, &endpoint.path, &endpoint.query_params);
-
-        let req_method = match endpoint.method {
+        let method = match endpoint.method {
             HttpMethod::Get => reqwest::Method::GET,
             HttpMethod::Post => reqwest::Method::POST,
             HttpMethod::Put => reqwest::Method::PUT,
-            HttpMethod::Patch => reqwest::Method::PATCH,
             HttpMethod::Delete => reqwest::Method::DELETE,
+            HttpMethod::Patch => reqwest::Method::PATCH,
             HttpMethod::Head => reqwest::Method::HEAD,
             HttpMethod::Options => reqwest::Method::OPTIONS,
         };
 
-        let mut req_builder = self.client.request(req_method, &full_url);
+        let target_url = self.resolve_url(base_url, &endpoint.path);
+        let mut req = self.client.request(method, &target_url);
 
-        // 1. Timeout
-        if let Some(timeout) = endpoint.timeout_override {
-            req_builder = req_builder.timeout(timeout);
-        } else {
-            req_builder = req_builder.timeout(self.default_timeout);
-        }
-
-        // 2. Headers
-        let mut header_map = HeaderMap::new();
+        // Apply global headers first
         for (k, v) in global_headers {
-            if let (Ok(name), Ok(val)) = (HeaderName::from_str(k), HeaderValue::from_str(v)) {
-                header_map.insert(name, val);
-            }
+            let h_name = HeaderName::from_str(k).map_err(|e| ApiSnapError::InvalidConfig {
+                location: format!("global_headers.{}", k),
+                reason: format!("invalid header name: {e}"),
+            })?;
+            let h_val = HeaderValue::from_str(v).map_err(|e| ApiSnapError::InvalidConfig {
+                location: format!("global_headers.{}", k),
+                reason: format!("invalid header value: {e}"),
+            })?;
+            req = req.header(h_name, h_val);
         }
+
+        // Apply per-endpoint headers (override global)
         for (k, v) in &endpoint.headers {
-            if let (Ok(name), Ok(val)) = (HeaderName::from_str(k), HeaderValue::from_str(v)) {
-                header_map.insert(name, val);
-            }
+            let h_name = HeaderName::from_str(k).map_err(|e| ApiSnapError::InvalidConfig {
+                location: format!("endpoint '{}'.headers.{}", endpoint.name, k),
+                reason: format!("invalid header name: {e}"),
+            })?;
+            let h_val = HeaderValue::from_str(v).map_err(|e| ApiSnapError::InvalidConfig {
+                location: format!("endpoint '{}'.headers.{}", endpoint.name, k),
+                reason: format!("invalid header value: {e}"),
+            })?;
+            req = req.header(h_name, h_val);
         }
-        req_builder = req_builder.headers(header_map);
 
-        // 3. Authentication: Endpoint override takes precedence over global auth
-        let auth_provider = if let Some(override_cfg) = &endpoint.auth_override {
-            Some(create_auth_provider(override_cfg, self.client.clone()))
+        // Apply query params
+        if !endpoint.query_params.is_empty() {
+            req = req.query(&endpoint.query_params);
+        }
+
+        // Apply body
+        if let Some(body) = &endpoint.body {
+            req = req.json(body);
+        }
+
+        // Apply timeout override
+        if let Some(timeout) = endpoint.timeout_override {
+            req = req.timeout(timeout);
         } else {
-            global_auth
-        };
-
-        if let Some(auth) = auth_provider {
-            req_builder = auth.apply(req_builder).await?;
+            req = req.timeout(self.default_timeout);
         }
 
-        // 4. Body
-        if let Some(body_val) = &endpoint.body {
-            req_builder = req_builder.json(body_val);
+        // Apply Auth provider
+        if let Some(auth_provider) = auth {
+            req = auth_provider.apply(req).await?;
         }
 
-        let start_time = Instant::now();
-        let res = req_builder.send().await.map_err(|e| {
+        // Dispatch and benchmark execution time
+        let start = Instant::now();
+        let response = req.send().await.map_err(|e| {
             if e.is_timeout() {
-                let timeout_val = endpoint
-                    .timeout_override
-                    .unwrap_or(self.default_timeout)
-                    .as_millis() as u64;
                 ApiSnapError::Timeout {
-                    url: full_url.clone(),
-                    timeout_ms: timeout_val,
+                    url: target_url.clone(),
+                    timeout_ms: endpoint.timeout_override.unwrap_or(self.default_timeout).as_millis() as u64,
                 }
             } else {
                 ApiSnapError::Network {
-                    url: full_url.clone(),
+                    url: target_url.clone(),
                     source: e,
                 }
             }
         })?;
 
-        let duration_ms = start_time.elapsed().as_millis() as u64;
-        let status_code = res.status().as_u16();
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let status_code = response.status().as_u16();
 
-        let mut response_headers = HashMap::new();
-        for (k, v) in res.headers().iter() {
+        let mut headers = HashMap::new();
+        for (k, v) in response.headers() {
             if let Ok(str_val) = v.to_str() {
-                response_headers.insert(k.as_str().to_string(), str_val.to_string());
+                headers.insert(k.as_str().to_string(), str_val.to_string());
             }
         }
 
-        let body_bytes = res.bytes().await.map_err(|e| ApiSnapError::Network {
-            url: full_url.clone(),
+        let bytes = response.bytes().await.map_err(|e| ApiSnapError::Network {
+            url: target_url.clone(),
             source: e,
         })?;
 
-        let body_val: Value = if body_bytes.is_empty() {
-            Value::Null
-        } else {
-            let mut mutable_bytes = body_bytes.to_vec();
+        // Empty body fallback
+        if bytes.is_empty() {
+            return Ok(RawResponse {
+                body: Value::Null,
+                status_code,
+                headers,
+                duration_ms,
+            });
+        }
+
+        // Use SIMD-JSON for large payloads (>= 1MB) or fallback to Standard Parser
+        let body: Value = if bytes.len() >= 1024 * 1024 {
+            let mut mut_bytes = bytes.to_vec();
             self.fast_engine
-                .parse_slice(&mut mutable_bytes)
-                .unwrap_or_else(|_| {
-                    let s = String::from_utf8_lossy(&body_bytes).to_string();
-                    Value::String(s)
-                })
+                .parse_slice(&mut mut_bytes)
+                .map_err(|e| ApiSnapError::MalformedJson {
+                    context: format!("endpoint '{}' large response body", endpoint.name),
+                    source: serde_json::Error::io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        e,
+                    )),
+                })?
+        } else {
+            serde_json::from_slice(&bytes).map_err(|e| ApiSnapError::MalformedJson {
+                context: format!("endpoint '{}' response body", endpoint.name),
+                source: e,
+            })?
         };
 
         Ok(RawResponse {
+            body,
             status_code,
-            headers: response_headers,
-            body: body_val,
+            headers,
             duration_ms,
         })
     }
-}
-
-fn build_url(
-    base_url: &str,
-    path: &str,
-    query_params: &HashMap<String, String>,
-) -> String {
-    let trimmed_base = base_url.trim_end_matches('/');
-    let trimmed_path = if path.starts_with('/') {
-        path.to_string()
-    } else {
-        format!("/{path}")
-    };
-
-    let mut url_str = format!("{trimmed_base}{trimmed_path}");
-    if !query_params.is_empty() {
-        let mut pairs = Vec::new();
-        for (k, v) in query_params {
-            pairs.push(format!("{k}={v}"));
-        }
-        url_str = format!("{url_str}?{}", pairs.join("&"));
-    }
-
-    url_str
 }

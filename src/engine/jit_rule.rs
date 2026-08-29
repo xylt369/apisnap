@@ -27,7 +27,7 @@ pub fn fnv1a_hash(s: &str) -> u64 {
     const FNV_PRIME: u64 = 0x100000001b3;
     let mut hash = FNV_OFFSET;
     for byte in s.as_bytes() {
-        hash ^= byte as u64;
+        hash ^= *byte as u64;
         hash = hash.wrapping_mul(FNV_PRIME);
     }
     hash
@@ -128,8 +128,8 @@ impl CraneliftRuleEngine {
 fn emit_trie_level(
     builder: &mut FunctionBuilder,
     node: &PathTrieNode,
-    ptr_val: Value,
-    len_val: Value,
+    ptr_val: cranelift::prelude::Value,
+    len_val: cranelift::prelude::Value,
     depth: i64,
     no_match_block: Block,
 ) {

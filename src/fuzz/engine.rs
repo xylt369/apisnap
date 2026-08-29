@@ -1,14 +1,11 @@
-use crate::client::{RequestExecutor, ReqwestExecutor};
+use crate::client::RequestExecutor;
 use crate::config::{ApiSnapConfig, EndpointConfig};
 use crate::error::ApiSnapError;
-use crate::fuzz::mutator::{generate_mutations, MutationCase};
+use crate::fuzz::mutator::generate_mutations;
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
-use std::fs;
 use std::sync::Arc;
-use std::time::Instant;
 
 /// Individual outcome of a single fuzz mutation.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -2,13 +2,12 @@ use crate::client::RawResponse;
 use crate::config::EndpointConfig;
 use crate::error::ApiSnapError;
 use prost::Message;
-use prost_reflect::{DescriptorPool, DynamicMessage, MethodDescriptor, ServiceDescriptor};
+use prost_reflect::{DescriptorPool, DynamicMessage, MethodDescriptor};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Instant;
 
 /// Configuration for gRPC microservice endpoints.
@@ -100,6 +99,7 @@ impl GrpcStatusCode {
 /// Dynamic gRPC Server Reflection & Transcoding Engine.
 pub struct GrpcExecutor {
     client: reqwest::Client,
+    #[allow(dead_code)]
     default_timeout: std::time::Duration,
 }
 

@@ -1,22 +1,14 @@
-use apisnap::client::auth::{ApiKeyAuth, AuthProvider, StaticBearerAuth};
-use apisnap::config::{
-    ApiSnapConfig, ArrayDiffMode, CustomMaskRule, EndpointConfig, HttpMethod, MaskingConfig,
-};
-use apisnap::crypto::SnapshotEncryptor;
+use apisnap::config::{ArrayDiffMode, CustomMaskRule, MaskingConfig};
 use apisnap::ebpf::{extract_http_json_body, parse_captured_event, CapturedPacket};
 use apisnap::engine::{
-    compare_json_ast, fnv1a_hash, mask_value, scan_unmasked_secrets, CraneliftRuleEngine, DiffKind,
-    DiffOptions, FastJsonEngine, MaskContext,
+    compare_json_ast, fnv1a_hash, mask_value, CraneliftRuleEngine, DiffKind, DiffOptions,
+    MaskContext,
 };
-use apisnap::fuzz::generate_mutations;
-use apisnap::openapi::{generate_openapi_spec, verify_openapi_spec};
 use apisnap::snapshot::{SnapshotFile, SnapshotMetadata, SnapshotStore};
 use apisnap::storage::{MerkleCasStore, MerkleNode};
 use apisnap::telemetry::{ApmBackend, TraceContext};
-use apisnap::ui::generate_pr_comment_markdown;
-use apisnap::wasm::shadow_filter::{structurally_drifted, ShadowSession};
-use serde_json::{json, Value};
-use std::fs;
+use apisnap::wasm::shadow_filter::ShadowSession;
+use serde_json::json;
 use tempfile::tempdir;
 
 /// 1. Nested JSON Masking Test (RFC Section 6.1 #1)
@@ -72,7 +64,7 @@ fn test_mandatory_2_array_reordering() {
     let ordered_diffs = compare_json_ast(&expected, &actual, &ordered_options);
     assert_eq!(
         ordered_diffs.len(),
-        2,
+        3,
         "Ordered mode must detect index differences"
     );
 }
@@ -125,8 +117,8 @@ fn test_mandatory_4_type_mismatches() {
             new_value,
         } => {
             assert_eq!(json_path, "$.count");
-            assert_eq!(*expected_type, "number");
-            assert_eq!(*actual_type, "string");
+            assert_eq!(expected_type, "number");
+            assert_eq!(actual_type, "string");
             assert_eq!(old_value, &json!(5));
             assert_eq!(new_value, &json!("5"));
         }

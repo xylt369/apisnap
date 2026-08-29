@@ -27,8 +27,8 @@ pub enum DiffKind {
     /// Same key/index, but `serde_json::Value` type variant differs (e.g. String vs Number).
     TypeMismatch {
         json_path: String,
-        expected_type: &'static str,
-        actual_type: &'static str,
+        expected_type: String,
+        actual_type: String,
         old_value: serde_json::Value,
         new_value: serde_json::Value,
     },
@@ -62,116 +62,74 @@ impl DiffReport {
 
     pub fn render_colored(&self) -> String {
         let mut out = String::new();
-
-        out.push_str(&format!(
-            "\n{} {}\n",
-            "Snapshot Diff Report for:".bold(),
-            self.endpoint_name.cyan().bold()
-        ));
-
         if self.expected_status != self.actual_status {
             out.push_str(&format!(
-                "  {} Status code mismatch: expected {}, got {}\n",
-                "[!]".red().bold(),
-                self.expected_status.to_string().green(),
+                "    {} HTTP Status: expected {}, got {}\n",
+                "!".yellow().bold(),
+                self.expected_status.to_string().cyan(),
                 self.actual_status.to_string().red()
             ));
         }
-
-        if self.differences.is_empty() && self.expected_status == self.actual_status {
-            out.push_str(&format!("  {} 100% Match\n", "[PASS]".green().bold()));
-            return out;
-        }
-
         for diff in &self.differences {
             match diff {
                 DiffKind::Added { json_path, new_value } => {
                     out.push_str(&format!(
-                        "  {} {}: {}\n",
+                        "    {} Added {}: {}\n",
                         "+".green().bold(),
-                        json_path.green(),
-                        format_json_compact(new_value).green()
+                        json_path.cyan(),
+                        new_value.to_string().green()
                     ));
                 }
                 DiffKind::Removed { json_path, old_value } => {
                     out.push_str(&format!(
-                        "  {} {}: {}\n",
+                        "    {} Removed {}: {}\n",
                         "-".red().bold(),
-                        json_path.red(),
-                        format_json_compact(old_value).red()
+                        json_path.cyan(),
+                        old_value.to_string().red()
                     ));
                 }
                 DiffKind::Modified { json_path, old_value, new_value } => {
                     out.push_str(&format!(
-                        "  {} {}\n    {} {}\n    {} {}\n",
+                        "    {} Modified {}: {} -> {}\n",
                         "~".yellow().bold(),
-                        json_path.yellow().bold(),
-                        "-".red(),
-                        format_json_compact(old_value).red(),
-                        "+".green(),
-                        format_json_compact(new_value).green()
+                        json_path.cyan(),
+                        old_value.to_string().red(),
+                        new_value.to_string().green()
                     ));
                 }
-                DiffKind::TypeMismatch {
-                    json_path,
-                    expected_type,
-                    actual_type,
-                    old_value,
-                    new_value,
-                } => {
+                DiffKind::TypeMismatch { json_path, expected_type, actual_type, .. } => {
                     out.push_str(&format!(
-                        "  {} {} (type mismatch: expected {}, got {})\n    {} {}\n    {} {}\n",
-                        "x".red().bold(),
-                        json_path.red().bold(),
-                        expected_type.yellow(),
-                        actual_type.yellow(),
-                        "-".red(),
-                        format_json_compact(old_value).red(),
-                        "+".green(),
-                        format_json_compact(new_value).green()
+                        "    {} Type Mismatch {}: expected {}, got {}\n",
+                        "!".yellow().bold(),
+                        json_path.cyan(),
+                        expected_type.cyan(),
+                        actual_type.red()
                     ));
                 }
-                DiffKind::ArrayLengthMismatch {
-                    json_path,
-                    expected_len,
-                    actual_len,
-                } => {
+                DiffKind::ArrayLengthMismatch { json_path, expected_len, actual_len } => {
                     out.push_str(&format!(
-                        "  {} {} (array length changed: {} -> {})\n",
-                        "~".yellow().bold(),
-                        json_path.yellow(),
-                        expected_len.to_string().red(),
-                        actual_len.to_string().green()
+                        "    {} Array Length Mismatch {}: expected {}, got {}\n",
+                        "!".yellow().bold(),
+                        json_path.cyan(),
+                        expected_len,
+                        actual_len
                     ));
                 }
                 DiffKind::DepthExceeded { json_path, max_depth } => {
                     out.push_str(&format!(
-                        "  {} {} (max recursion depth {} exceeded)\n",
+                        "    {} Recursion depth exceeded at {} (max: {})\n",
                         "!".red().bold(),
-                        json_path.red(),
+                        json_path.cyan(),
                         max_depth
                     ));
                 }
             }
         }
-
-        out.push_str(&format!(
-            "\n  Total differences: {}\n",
-            self.differences.len().to_string().bold()
-        ));
-
         out
     }
 }
 
-fn format_json_compact(val: &Value) -> String {
-    match val {
-        Value::String(s) => format!("\"{s}\""),
-        _ => val.to_string(),
-    }
-}
-
-/// Configuration for semantic comparison options.
+/// Options controlling AST comparison behavior.
 #[derive(Debug, Clone)]
 pub struct DiffOptions {
     pub float_epsilon: f64,
@@ -193,18 +151,19 @@ impl Default for DiffOptions {
     }
 }
 
-/// Compare expected and actual JSON ASTs semantically with fast-path bypass.
+/// Compare two JSON ASTs recursively with semantic rules.
 pub fn compare_json_ast(
     expected: &Value,
     actual: &Value,
     options: &DiffOptions,
 ) -> Vec<DiffKind> {
-    // Fast-path bypass for identical subtrees
-    if options.fast_hash_bypass && options.float_epsilon == 0.0 && expected == actual {
-        return Vec::new();
+    let mut differences = Vec::new();
+
+    // Fast-Hash bypass: If raw serialized structures are byte-for-byte identical, return immediately
+    if options.fast_hash_bypass && expected == actual {
+        return differences;
     }
 
-    let mut differences = Vec::new();
     diff_recursive(expected, actual, "$", options, 0, &mut differences);
     differences
 }
@@ -225,15 +184,13 @@ fn diff_recursive(
         return;
     }
 
-    let exp_type = json_type_name(expected);
-    let act_type = json_type_name(actual);
-
-    // 1. Type mismatch check
-    if exp_type != act_type {
+    // 1. Variant Type Mismatch
+    let (e_type, a_type) = (value_type_name(expected), value_type_name(actual));
+    if e_type != a_type {
         out.push(DiffKind::TypeMismatch {
             json_path: path.to_string(),
-            expected_type: exp_type,
-            actual_type: act_type,
+            expected_type: e_type.to_string(),
+            actual_type: a_type.to_string(),
             old_value: expected.clone(),
             new_value: actual.clone(),
         });
@@ -243,7 +200,6 @@ fn diff_recursive(
     // 2. Structural matching by variant
     match (expected, actual) {
         (Value::Object(e_map), Value::Object(a_map)) => {
-            // Apply Unicode normalization if enabled
             let e_normalized: BTreeMap<String, &Value> = if options.normalize_unicode_keys {
                 e_map.iter().map(|(k, v)| (k.nfc().collect::<String>(), v)).collect()
             } else {
@@ -298,22 +254,23 @@ fn diff_recursive(
                         });
                     }
 
-                    let min_len = std::cmp::min(e_arr.len(), a_arr.len());
+                    let min_len = e_arr.len().min(a_arr.len());
                     for i in 0..min_len {
                         let child_path = format!("{path}[{i}]");
                         diff_recursive(&e_arr[i], &a_arr[i], &child_path, options, depth + 1, out);
                     }
 
-                    // Extra actual elements
-                    for (i, extra) in a_arr.iter().enumerate().skip(min_len) {
-                        out.push(DiffKind::Added {
-                            json_path: format!("{path}[{i}]"),
-                            new_value: extra.clone(),
-                        });
+                    if a_arr.len() > e_arr.len() {
+                        for (idx, item) in a_arr.iter().enumerate().skip(e_arr.len()) {
+                            out.push(DiffKind::Added {
+                                json_path: format!("{path}[{idx}]"),
+                                new_value: item.clone(),
+                            });
+                        }
                     }
                 }
                 ArrayDiffMode::Set => {
-                    diff_array_as_set(e_arr, a_arr, path, out);
+                    diff_array_as_set(e_arr, a_arr, path, options, depth, out);
                 }
             }
         }
@@ -321,8 +278,8 @@ fn diff_recursive(
             if e_str != a_str {
                 out.push(DiffKind::Modified {
                     json_path: path.to_string(),
-                    old_value: expected.clone(),
-                    new_value: actual.clone(),
+                    old_value: Value::String(e_str.clone()),
+                    new_value: Value::String(a_str.clone()),
                 });
             }
         }
@@ -340,8 +297,8 @@ fn diff_recursive(
             if !is_match {
                 out.push(DiffKind::Modified {
                     json_path: path.to_string(),
-                    old_value: expected.clone(),
-                    new_value: actual.clone(),
+                    old_value: Value::Number(e_num.clone()),
+                    new_value: Value::Number(a_num.clone()),
                 });
             }
         }
@@ -349,13 +306,13 @@ fn diff_recursive(
             if e_bool != a_bool {
                 out.push(DiffKind::Modified {
                     json_path: path.to_string(),
-                    old_value: expected.clone(),
-                    new_value: actual.clone(),
+                    old_value: Value::Bool(*e_bool),
+                    new_value: Value::Bool(*a_bool),
                 });
             }
         }
         (Value::Null, Value::Null) => {}
-        _ => unreachable!("Variant mismatch already handled by json_type_name check"),
+        _ => unreachable!("variant type mismatch already handled above"),
     }
 }
 
@@ -363,60 +320,45 @@ fn diff_array_as_set(
     expected: &[Value],
     actual: &[Value],
     path: &str,
+    options: &DiffOptions,
+    depth: usize,
     out: &mut Vec<DiffKind>,
 ) {
-    let mut e_canonical: BTreeMap<String, usize> = BTreeMap::new();
-    let mut a_canonical: BTreeMap<String, usize> = BTreeMap::new();
+    let mut actual_matched = vec![false; actual.len()];
 
-    for item in expected {
-        let key = canonical_json_string(item);
-        *e_canonical.entry(key).or_insert(0) += 1;
-    }
-
-    for item in actual {
-        let key = canonical_json_string(item);
-        *a_canonical.entry(key).or_insert(0) += 1;
-    }
-
-    for (key, &count) in &e_canonical {
-        let actual_count = a_canonical.get(key).copied().unwrap_or(0);
-        if count > actual_count {
-            let val: Value = serde_json::from_str(key).unwrap_or(Value::Null);
-            for _ in 0..(count - actual_count) {
-                out.push(DiffKind::Removed {
-                    json_path: format!("{path}[*]"),
-                    old_value: val.clone(),
-                });
+    for e_item in expected {
+        let mut matched = false;
+        for (a_idx, a_item) in actual.iter().enumerate() {
+            if !actual_matched[a_idx] {
+                let mut temp_diffs = Vec::new();
+                diff_recursive(e_item, a_item, path, options, depth + 1, &mut temp_diffs);
+                if temp_diffs.is_empty() {
+                    actual_matched[a_idx] = true;
+                    matched = true;
+                    break;
+                }
             }
+        }
+        if !matched {
+            out.push(DiffKind::Removed {
+                json_path: format!("{path}[*]"),
+                old_value: e_item.clone(),
+            });
         }
     }
 
-    for (key, &count) in &a_canonical {
-        let expected_count = e_canonical.get(key).copied().unwrap_or(0);
-        if count > expected_count {
-            let val: Value = serde_json::from_str(key).unwrap_or(Value::Null);
-            for _ in 0..(count - expected_count) {
-                out.push(DiffKind::Added {
-                    json_path: format!("{path}[*]"),
-                    new_value: val.clone(),
-                });
-            }
+    for (a_idx, &matched) in actual_matched.iter().enumerate() {
+        if !matched {
+            out.push(DiffKind::Added {
+                json_path: format!("{path}[*]"),
+                new_value: actual[a_idx].clone(),
+            });
         }
     }
 }
 
-fn canonical_json_string(val: &Value) -> String {
-    match val {
-        Value::Object(map) => {
-            let sorted_map: BTreeMap<&str, Value> = map.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-            serde_json::to_string(&sorted_map).unwrap_or_default()
-        }
-        _ => serde_json::to_string(val).unwrap_or_default(),
-    }
-}
-
-fn json_type_name(val: &Value) -> &'static str {
-    match val {
+fn value_type_name(v: &Value) -> &'static str {
+    match v {
         Value::Null => "null",
         Value::Bool(_) => "boolean",
         Value::Number(_) => "number",

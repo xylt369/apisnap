@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use simd_json::BorrowedValue;
 use std::collections::BTreeSet;
 
 /// Configuration for the Shadow Compare Wasm Filter.
@@ -71,12 +72,11 @@ impl ShadowSession {
 /// 简化版结构漂移检测：比较 Object 的键集合与 Array 长度是否一致，
 /// 避免在 Wasm 沙箱内构造完整 DiffReport 带来的额外分配开销。
 pub fn structurally_drifted(
-    a: &simd_json::BorrowedValue,
-    b: &simd_json::BorrowedValue,
+    a: &BorrowedValue,
+    b: &BorrowedValue,
 ) -> bool {
-    use simd_json::ValueAccess;
-    match (a.as_object(), b.as_object()) {
-        (Some(ao), Some(bo)) => {
+    match (a, b) {
+        (BorrowedValue::Object(ao), BorrowedValue::Object(bo)) => {
             let ak: BTreeSet<_> = ao.keys().collect();
             let bk: BTreeSet<_> = bo.keys().collect();
             if ak != bk {
@@ -87,18 +87,16 @@ pub fn structurally_drifted(
                     .map_or(true, |bv| structurally_drifted(av, bv))
             })
         }
-        (Some(_), None) | (None, Some(_)) => true,
-        (None, None) => {
-            if let (Some(aa), Some(ba)) = (a.as_array(), b.as_array()) {
-                aa.len() != ba.len()
-                    || aa
-                        .iter()
-                        .zip(ba.iter())
-                        .any(|(x, y)| structurally_drifted(x, y))
-            } else {
-                false
-            }
+        (BorrowedValue::Object(_), _) | (_, BorrowedValue::Object(_)) => true,
+        (BorrowedValue::Array(aa), BorrowedValue::Array(ba)) => {
+            aa.len() != ba.len()
+                || aa
+                    .iter()
+                    .zip(ba.iter())
+                    .any(|(x, y)| structurally_drifted(x, y))
         }
+        (BorrowedValue::Array(_), _) | (_, BorrowedValue::Array(_)) => true,
+        _ => false,
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::client::{RequestExecutor, ReqwestExecutor};
+use crate::client::RequestExecutor;
 use crate::config::ApiSnapConfig;
 use crate::engine::{mask_value, MaskContext};
 use crate::error::ApiSnapError;
@@ -6,7 +6,6 @@ use crate::snapshot::SnapshotStore;
 use jsonschema::JSONSchema;
 use serde_json::Value;
 use std::fs;
-use std::sync::Arc;
 
 /// Result of OpenAPI contract drift verification.
 #[derive(Debug, Clone)]
@@ -45,7 +44,7 @@ pub fn verify_openapi_spec(
             &snapshot.masked_body,
             snapshot.metadata.status_code,
             &endpoint.name,
-            &endpoint.method.to_string(),
+            &method_key,
             &path_key,
             paths_obj,
             &mut matched,
@@ -62,13 +61,13 @@ pub fn verify_openapi_spec(
     })
 }
 
-/// Live API Response Verification: Queries target endpoints in real time and validates against OpenAPI spec.
+/// Live endpoint verification against an OpenAPI specification.
 pub async fn verify_openapi_live(
     config: &ApiSnapConfig,
     spec_path: &str,
+    executor: &dyn RequestExecutor,
 ) -> Result<OpenApiVerifyResult, ApiSnapError> {
     let spec_val = load_openapi_spec(spec_path)?;
-    let executor = ReqwestExecutor::new(config.timeout);
     let mut total_checked = 0;
     let mut matched = 0;
     let mut drift = 0;
@@ -108,7 +107,7 @@ pub async fn verify_openapi_live(
             &masked_live,
             raw_res.status_code,
             &endpoint.name,
-            &endpoint.method.to_string(),
+            &method_key,
             &path_key,
             paths_obj,
             &mut matched,
@@ -178,40 +177,57 @@ fn validate_ast_against_openapi(
         .get(path_key)
         .and_then(|p| p.get(&method_lower))
         .and_then(|op| op.get("responses"))
-        .and_then(|r| r.get(status_code.to_string().as_str()))
-        .and_then(|status_resp| status_resp.get("content"))
-        .and_then(|content| content.get("application/json"))
-        .and_then(|app_json| app_json.get("schema"));
+        .and_then(|resps| {
+            resps
+                .get(&status_code.to_string())
+                .or_else(|| resps.get("default"))
+        })
+        .and_then(|resp| resp.get("content"))
+        .and_then(|c| {
+            c.get("application/json")
+                .or_else(|| c.get("application/grpc+json"))
+                .or_else(|| c.get("*/*"))
+        })
+        .and_then(|media| media.get("schema"));
 
-    if let Some(schema) = schema_val {
-        match JSONSchema::compile(schema) {
-            Ok(compiled_schema) => {
-                let validation = compiled_schema.validate(body);
-                if let Err(err_iter) = validation {
-                    *drift += 1;
-                    for err in err_iter {
-                        errors.push(format!(
-                            "Contract Drift in '{}' ({} {}): {} at '{}'",
-                            endpoint_name, method, path_key, err, err.instance_path
-                        ));
-                    }
-                } else {
-                    *matched += 1;
-                }
-            }
-            Err(compile_err) => {
-                errors.push(format!(
-                    "Schema compilation error in OpenAPI for '{}': {}",
-                    endpoint_name, compile_err
-                ));
+    let schema = match schema_val {
+        Some(s) => s,
+        None => {
+            *drift += 1;
+            errors.push(format!(
+                "Endpoint '{}' ({} {}): Missing schema definition in OpenAPI spec for status {}",
+                endpoint_name,
+                method.to_uppercase(),
+                path_key,
+                status_code
+            ));
+            return;
+        }
+    };
+
+    match JSONSchema::compile(schema) {
+        Ok(compiled) => {
+            let validation_res = compiled.validate(body);
+            if let Err(schema_errors) = validation_res {
                 *drift += 1;
+                let error_msgs: Vec<String> = schema_errors
+                    .map(|e| format!("  - at '{}': {}", e.instance_path, e))
+                    .collect();
+                errors.push(format!(
+                    "Endpoint '{}' schema contract violation:\n{}",
+                    endpoint_name,
+                    error_msgs.join("\n")
+                ));
+            } else {
+                *matched += 1;
             }
         }
-    } else {
-        errors.push(format!(
-            "Undocumented endpoint response in OpenAPI spec: {} {} (HTTP {})",
-            method, path_key, status_code
-        ));
-        *drift += 1;
+        Err(e) => {
+            *drift += 1;
+            errors.push(format!(
+                "Endpoint '{}' invalid OpenAPI JSONSchema definition: {}",
+                endpoint_name, e
+            ));
+        }
     }
 }

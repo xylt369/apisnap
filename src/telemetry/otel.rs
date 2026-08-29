@@ -1,5 +1,4 @@
 use rand::RngCore;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::RequestBuilder;
 
 /// W3C Trace Context `traceparent` 头的完整二进制表示。
