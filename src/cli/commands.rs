@@ -5,7 +5,7 @@ use crate::crypto::SnapshotEncryptor;
 use crate::engine::{compare_json_ast, mask_value, DiffOptions, DiffReport, MaskContext};
 use crate::error::ApiSnapError;
 use crate::fuzz::{render_fuzz_report, FuzzEngine};
-use crate::openapi::{generate_openapi_spec, verify_openapi_spec};
+use crate::openapi::{generate_openapi_spec, verify_openapi_live, verify_openapi_spec};
 use crate::snapshot::{SnapshotFile, SnapshotMetadata, SnapshotStore};
 use crate::ui::{generate_pr_comment_markdown, print_summary_report, run_interactive_review, ReviewItem};
 use colored::Colorize;
@@ -422,15 +422,28 @@ pub fn handle_openapi_generate(config_path: &str, output_path: &str) -> Result<(
     Ok(())
 }
 
-pub fn handle_openapi_verify(config_path: &str, spec_path: &str) -> Result<(), ApiSnapError> {
+pub async fn handle_openapi_verify(
+    config_path: &str,
+    spec_path: &str,
+    is_live: bool,
+) -> Result<(), ApiSnapError> {
     let config = ApiSnapConfig::load_from_file(config_path)?;
-    println!(
-        "\n{} Verifying snapshots against OpenAPI specification: '{}'...",
-        "ApiSnap".cyan().bold(),
-        spec_path.cyan()
-    );
 
-    let result = verify_openapi_spec(&config, spec_path)?;
+    let result = if is_live {
+        println!(
+            "\n{} Verifying LIVE API responses against OpenAPI specification: '{}'...",
+            "ApiSnap".cyan().bold(),
+            spec_path.cyan()
+        );
+        verify_openapi_live(&config, spec_path).await?
+    } else {
+        println!(
+            "\n{} Verifying recorded snapshots against OpenAPI specification: '{}'...",
+            "ApiSnap".cyan().bold(),
+            spec_path.cyan()
+        );
+        verify_openapi_spec(&config, spec_path)?
+    };
 
     println!(
         "Checked {} endpoint(s): {} matched, {} contract drift(s).",
@@ -450,7 +463,7 @@ pub fn handle_openapi_verify(config_path: &str, spec_path: &str) -> Result<(), A
         });
     }
 
-    println!("{} All snapshots fully match OpenAPI specification!\n", "[PASS]".green().bold());
+    println!("{} All endpoints fully match OpenAPI specification!\n", "[PASS]".green().bold());
     Ok(())
 }
 

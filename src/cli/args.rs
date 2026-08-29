@@ -111,7 +111,7 @@ pub enum OpenApiActions {
     /// Synthesize an OpenAPI 3.1 specification YAML from recorded snapshot files
     Generate(OpenApiGenerateArgs),
 
-    /// Verify recorded snapshots against an existing OpenAPI specification file
+    /// Verify recorded snapshots or live endpoints against an existing OpenAPI specification file
     Verify(OpenApiVerifyArgs),
 }
 
@@ -135,4 +135,8 @@ pub struct OpenApiVerifyArgs {
     /// Path to the existing OpenAPI specification file (YAML or JSON)
     #[arg(short, long, default_value = "openapi.yaml")]
     pub spec: String,
+
+    /// Query live endpoints in real time rather than reading stored snapshots
+    #[arg(long)]
+    pub live: bool,
 }

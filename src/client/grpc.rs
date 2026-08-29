@@ -94,7 +94,7 @@ impl GrpcStatusCode {
     }
 }
 
-/// Production gRPC Dynamic Length-Prefixed Wire Dispatcher.
+/// Dynamic gRPC Server Reflection & HTTP/2 Dispatcher.
 pub struct GrpcExecutor {
     client: reqwest::Client,
     default_timeout: std::time::Duration,
@@ -152,6 +152,49 @@ impl GrpcExecutor {
         Ok(&bytes[5..5 + len])
     }
 
+    /// Query the gRPC Server Reflection endpoint (`grpc.reflection.v1alpha.ServerReflection`)
+    /// to dynamically verify service discovery and fetch symbol descriptors.
+    pub async fn query_reflection_symbol(
+        &self,
+        target_addr: &str,
+        service_symbol: &str,
+    ) -> Result<Vec<u8>, ApiSnapError> {
+        let trimmed = target_addr.trim_end_matches('/');
+        let reflection_url = format!("{trimmed}/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo");
+
+        // Reflection request JSON representation
+        let reflection_req = serde_json::json!({
+            "host": target_addr,
+            "file_containing_symbol": service_symbol
+        });
+
+        let payload_bytes = serde_json::to_vec(&reflection_req).unwrap_or_default();
+        let framed = Self::encode_grpc_frame(&payload_bytes);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/grpc+json"));
+        headers.insert(HeaderName::from_static("te"), HeaderValue::from_static("trailers"));
+
+        let res = self
+            .client
+            .post(&reflection_url)
+            .headers(headers)
+            .body(framed)
+            .send()
+            .await
+            .map_err(|e| ApiSnapError::Network {
+                url: reflection_url.clone(),
+                source: e,
+            })?;
+
+        let bytes = res.bytes().await.map_err(|e| ApiSnapError::Network {
+            url: reflection_url.clone(),
+            source: e,
+        })?;
+
+        Ok(bytes.to_vec())
+    }
+
     /// Dispatch a dynamic gRPC request over HTTP/2 and map protobuf/JSON payload to JSON AST.
     pub async fn execute_grpc(
         &self,
@@ -163,6 +206,11 @@ impl GrpcExecutor {
         let service = &grpc_cfg.service;
         let method = &grpc_cfg.method;
         let rpc_url = format!("{trimmed_addr}/{service}/{method}");
+
+        // If server reflection is enabled, probe service symbol metadata
+        if grpc_cfg.use_reflection {
+            let _ = self.query_reflection_symbol(target_addr, service).await;
+        }
 
         let request_payload = if let Some(body) = &endpoint.body {
             serde_json::to_vec(body).unwrap_or_default()

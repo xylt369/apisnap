@@ -32,7 +32,9 @@ async fn main() {
         }
         Commands::Openapi(sub) => match sub.action {
             OpenApiActions::Generate(args) => handle_openapi_generate(&args.config, &args.output),
-            OpenApiActions::Verify(args) => handle_openapi_verify(&args.config, &args.spec),
+            OpenApiActions::Verify(args) => {
+                handle_openapi_verify(&args.config, &args.spec, args.live).await
+            }
         },
     };
 

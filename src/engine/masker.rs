@@ -49,6 +49,22 @@ pub const MASKED_SSN: &str = "<MASKED_SSN>";
 pub const MASKED_EMAIL: &str = "<MASKED_EMAIL>";
 pub const REDACTED: &str = "<REDACTED>";
 
+/// Pre-parsed token in a JSONPath expression tree (e.g. `$.items[*].id`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PathSegment {
+    Root,
+    Key(String),
+    Index(usize),
+    WildcardArray,
+}
+
+/// Tokenized rule compiled once at configuration load time.
+#[derive(Debug, Clone)]
+pub struct ParsedMaskRule {
+    pub segments: Vec<PathSegment>,
+    pub rule: CustomMaskRule,
+}
+
 /// Resolved masking context passed during recursive AST traversal.
 #[derive(Debug, Clone)]
 pub struct MaskContext {
@@ -56,18 +72,22 @@ pub struct MaskContext {
     pub strict_pii_mode: bool,
     pub max_depth: usize,
     pub unmask_allow_list: HashSet<String>,
-    pub path_rules: HashMap<String, CustomMaskRule>,
+    pub tokenized_rules: Vec<ParsedMaskRule>,
     pub precompiled_patterns: HashMap<String, Arc<Regex>>,
 }
 
 impl MaskContext {
     pub fn new(global_config: &MaskingConfig, overrides: &[CustomMaskRule]) -> Self {
-        let mut path_rules = HashMap::new();
+        let mut tokenized_rules = Vec::new();
         let mut precompiled_patterns = HashMap::new();
 
-        // Helper to insert and precompile regex
         let mut add_rule = |rule: &CustomMaskRule| {
-            path_rules.insert(rule.json_path.clone(), rule.clone());
+            let segments = parse_json_path_to_segments(&rule.json_path);
+            tokenized_rules.push(ParsedMaskRule {
+                segments,
+                rule: rule.clone(),
+            });
+
             if let Some(pattern_str) = &rule.pattern {
                 if !precompiled_patterns.contains_key(pattern_str) {
                     if let Ok(re) = Regex::new(pattern_str) {
@@ -94,7 +114,7 @@ impl MaskContext {
             strict_pii_mode: global_config.strict_pii_mode,
             max_depth: 512,
             unmask_allow_list,
-            path_rules,
+            tokenized_rules,
             precompiled_patterns,
         }
     }
@@ -105,15 +125,60 @@ impl MaskContext {
     }
 }
 
+/// Parse a raw JSONPath string (e.g. `$.data.items[*].id`) into structured tokens once.
+pub fn parse_json_path_to_segments(path: &str) -> Vec<PathSegment> {
+    let mut segments = Vec::new();
+    segments.push(PathSegment::Root);
+
+    let clean = path.trim_start_matches('$');
+    let mut current_key = String::new();
+    let mut chars = clean.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '.' {
+            if !current_key.is_empty() {
+                segments.push(PathSegment::Key(current_key.clone()));
+                current_key.clear();
+            }
+        } else if ch == '[' {
+            if !current_key.is_empty() {
+                segments.push(PathSegment::Key(current_key.clone()));
+                current_key.clear();
+            }
+            let mut num_str = String::new();
+            for c in chars.by_ref() {
+                if c == ']' {
+                    break;
+                }
+                num_str.push(c);
+            }
+            if num_str == "*" {
+                segments.push(PathSegment::WildcardArray);
+            } else if let Ok(idx) = num_str.parse::<usize>() {
+                segments.push(PathSegment::Index(idx));
+            }
+        } else {
+            current_key.push(ch);
+        }
+    }
+
+    if !current_key.is_empty() {
+        segments.push(PathSegment::Key(current_key));
+    }
+
+    segments
+}
+
 /// Recursively masks a JSON AST value in-place according to the given context.
 pub fn mask_value(val: &mut Value, ctx: &MaskContext) {
-    mask_recursive(val, ctx, "$", None, 0);
+    let mut current_segments = vec![PathSegment::Root];
+    mask_recursive(val, ctx, &mut current_segments, None, 0);
 }
 
 fn mask_recursive(
     val: &mut Value,
     ctx: &MaskContext,
-    current_path: &str,
+    current_segments: &mut Vec<PathSegment>,
     parent_key: Option<&str>,
     depth: usize,
 ) {
@@ -122,15 +187,16 @@ fn mask_recursive(
         return;
     }
 
-    // 1. Check if there is an exact or wildcard custom JSONPath rule matching this path
-    if let Some(rule) = match_custom_rule(ctx, current_path) {
+    // 1. Check pre-tokenized JSONPath rules without string allocations
+    if let Some(rule) = match_tokenized_rule(ctx, current_segments) {
         apply_custom_rule(val, rule, &ctx.precompiled_patterns);
         return;
     }
 
     // 2. Check strict PII mode allowlist
     if ctx.strict_pii_mode && is_leaf(val) {
-        if !ctx.unmask_allow_list.contains(current_path) {
+        let string_path = segments_to_string_path(current_segments);
+        if !ctx.unmask_allow_list.contains(&string_path) {
             *val = Value::String(REDACTED.to_string());
             return;
         }
@@ -139,14 +205,16 @@ fn mask_recursive(
     match val {
         Value::Object(map) => {
             for (key, child) in map.iter_mut() {
-                let child_path = format!("{current_path}.{key}");
-                mask_recursive(child, ctx, &child_path, Some(key), depth + 1);
+                current_segments.push(PathSegment::Key(key.clone()));
+                mask_recursive(child, ctx, current_segments, Some(key), depth + 1);
+                current_segments.pop();
             }
         }
         Value::Array(arr) => {
             for (idx, child) in arr.iter_mut().enumerate() {
-                let child_path = format!("{current_path}[{idx}]");
-                mask_recursive(child, ctx, &child_path, parent_key, depth + 1);
+                current_segments.push(PathSegment::Index(idx));
+                mask_recursive(child, ctx, current_segments, parent_key, depth + 1);
+                current_segments.pop();
             }
         }
         Value::String(s) => {
@@ -194,7 +262,44 @@ fn is_leaf(val: &Value) -> bool {
     matches!(val, Value::String(_) | Value::Number(_) | Value::Bool(_))
 }
 
-/// Pre-write secret scanner that aborts writes if raw unmasked secrets (e.g. AWS Keys) exist.
+fn match_tokenized_rule<'a>(ctx: &'a MaskContext, current: &[PathSegment]) -> Option<&'a CustomMaskRule> {
+    for parsed in &ctx.tokenized_rules {
+        if segments_match(&parsed.segments, current) {
+            return Some(&parsed.rule);
+        }
+    }
+    None
+}
+
+fn segments_match(rule_segments: &[PathSegment], current: &[PathSegment]) -> bool {
+    if rule_segments.len() != current.len() {
+        return false;
+    }
+    for (r, c) in rule_segments.iter().zip(current.iter()) {
+        match (r, c) {
+            (PathSegment::Root, PathSegment::Root) => {}
+            (PathSegment::Key(k1), PathSegment::Key(k2)) if k1 == k2 => {}
+            (PathSegment::Index(i1), PathSegment::Index(i2)) if i1 == i2 => {}
+            (PathSegment::WildcardArray, PathSegment::Index(_)) => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn segments_to_string_path(segments: &[PathSegment]) -> String {
+    let mut out = String::from("$");
+    for seg in segments.iter().skip(1) {
+        match seg {
+            PathSegment::Key(k) => out.push_str(&format!(".{k}")),
+            PathSegment::Index(i) => out.push_str(&format!("[{i}]")),
+            PathSegment::WildcardArray => out.push_str("[*]"),
+            PathSegment::Root => {}
+        }
+    }
+    out
+}
+
 pub fn scan_unmasked_secrets(val: &Value) -> Result<(), String> {
     scan_secrets_recursive(val, "$")
 }
@@ -224,7 +329,6 @@ fn scan_secrets_recursive(val: &Value, path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Luhn algorithm validation for credit card numbers.
 fn is_credit_card_luhn(s: &str) -> bool {
     let sanitized: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
     if sanitized.len() < 13 || sanitized.len() > 19 {
@@ -246,22 +350,6 @@ fn is_credit_card_luhn(s: &str) -> bool {
     }
 
     sum % 10 == 0
-}
-
-fn match_custom_rule<'a>(ctx: &'a MaskContext, path: &str) -> Option<&'a CustomMaskRule> {
-    if let Some(rule) = ctx.path_rules.get(path) {
-        return Some(rule);
-    }
-    let wildcard_path = normalize_wildcard_path(path);
-    if let Some(rule) = ctx.path_rules.get(&wildcard_path) {
-        return Some(rule);
-    }
-    None
-}
-
-fn normalize_wildcard_path(path: &str) -> String {
-    static ARRAY_INDEX_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\d+\]").unwrap());
-    ARRAY_INDEX_RE.replace_all(path, "[*]").to_string()
 }
 
 fn apply_custom_rule(
