@@ -302,10 +302,10 @@
             </div>
             <pre class="text-gray-300 leading-relaxed">{
   "status": "<span class="text-teal-300 font-bold">ACTIVE</span>",
-  "tier": "enterprise",
+  "organization": "platform_engineering",
   "user": {
     "id": 1082,
-    "role": "<span class="text-teal-300 font-bold">billing_admin</span>"
+    "role": "<span class="text-teal-300 font-bold">cluster_admin</span>"
   },
   "settings": {
     "mfa_enabled": true
@@ -723,10 +723,10 @@
 
         diffView.innerHTML = `{
   "status": "<span class="token-diff-del">ACTIVE</span>" → <span class="token-diff-add">SUSPENDED</span>,
-  "tier": "enterprise",
+  "organization": "platform_engineering",
   "user": {
     "id": 1082
-    <span class="token-diff-del">// [MISSING KEY] "role": "billing_admin"</span>
+    <span class="token-diff-del">// [MISSING KEY] "role": "cluster_admin"</span>
   },
   "settings": {
     "mfa_enabled": true
@@ -740,10 +740,10 @@
 
         diffView.innerHTML = `{
   "status": "<span class="text-emerald-400 font-bold">ACTIVE</span>",
-  "tier": "enterprise",
+  "organization": "platform_engineering",
   "user": {
     "id": 1082,
-    "role": "<span class="text-emerald-400 font-bold">billing_admin</span>"
+    "role": "<span class="text-emerald-400 font-bold">cluster_admin</span>"
   },
   "settings": {
     "mfa_enabled": true

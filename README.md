@@ -17,9 +17,7 @@
   - `apisnap openapi verify`: Validates live API responses against existing OpenAPI documentation to detect contract drift.
 - **Smart Resilience Fuzzing (`apisnap fuzz`)**: Boundary mutation engine generating SQLi, XSS, integer overflows, and missing-key variations to uncover HTTP 500 server crashes and stack trace leaks.
 - **Enterprise Security & Encryption at Rest**: AES-256-GCM authenticated encryption (`APISNAP_MASTER_KEY`) and pre-write secret defense scanning.
-- **Enterprise AuthProvider**: Auto-refreshing OAuth2 Client Credentials flow, API Key headers, Bearer tokens, and per-endpoint auth overrides.
-- **Interactive Review TUI**: Single-keystroke interactive review (`a`ccept / `r`eject / `s`kip).
-- **Pro Ecosystem**: Official VS Code Extension (Route CodeLens & Snapshot Explorer), GitHub Action CI Bot, and Next.js Landing Page.
+- **Ecosystem & CI/CD**: Native GitHub Action for PR regression checks, interactive documentation, and examples for Go/Node/Python/FastAPI.
 
 ---
 
