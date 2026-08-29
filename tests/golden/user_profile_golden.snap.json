@@ -1,0 +1,25 @@
+{
+  "endpoint_name": "user_profile_golden",
+  "metadata": {
+    "recorded_at": "2026-08-29T22:00:00Z",
+    "duration_ms": 15,
+    "status_code": 200,
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "apisnap_version": "0.1.0"
+  },
+  "masked_body": {
+    "code": 0,
+    "data": {
+      "user_id": "<MASKED_UUID>",
+      "username": "developer_alice",
+      "created_at": "<MASKED_TIMESTAMP>",
+      "tags": ["admin", "developer", "tester"],
+      "meta": {
+        "jwt": "<MASKED_JWT>",
+        "db_id": "<MASKED_OBJECT_ID>"
+      }
+    }
+  }
+}

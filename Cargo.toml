@@ -1,0 +1,40 @@
+[package]
+name = "apisnap"
+version = "0.1.0"
+edition = "2021"
+authors = ["ApiSnap Contributors"]
+description = "Language-agnostic API snapshot regression testing CLI with deterministic auto-masking"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# CLI & Terminal UI
+clap = { version = "4.5", features = ["derive", "env"] }
+colored = "2.1"
+ratatui = "0.28"
+crossterm = "0.28"
+indicatif = "0.17"
+
+# Async & Networking
+tokio = { version = "1.39", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "gzip", "brotli"] }
+url = "2.5"
+async-trait = "0.1"
+
+# Serialization & Pattern Matching
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+serde_yaml = "0.9"
+toml = "0.8"
+regex = "1.10"
+once_cell = "1.19"
+humantime-serde = "1.1"
+
+# Diffing & Diagnostics
+similar = { version = "2.6", features = ["inline"] }
+thiserror = "1.0"
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3.12"
+wiremock = "0.6"
