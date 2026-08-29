@@ -53,6 +53,10 @@ pub struct DiffReport {
     pub is_match: bool,
     pub expected_status: u16,
     pub actual_status: u16,
+    #[serde(default)]
+    pub trace_context: Option<String>,
+    #[serde(default)]
+    pub trace_link: Option<String>,
 }
 
 impl DiffReport {
@@ -124,6 +128,13 @@ impl DiffReport {
                     ));
                 }
             }
+        }
+        if let Some(link) = &self.trace_link {
+            out.push_str(&format!(
+                "    {} APM Trace Link: {}\n",
+                "*".cyan().bold(),
+                link.cyan().underline()
+            ));
         }
         out
     }

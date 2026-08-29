@@ -204,12 +204,29 @@ pub async fn handle_test(
         let differences = compare_json_ast(&stored_snapshot.masked_body, &actual_masked, &diff_options);
         let is_match = differences.is_empty();
 
+        let (trace_context, trace_link) = if let Some(tc) = &raw_res.trace_context {
+            let trace_str = tc.to_traceparent_header();
+            let link = if !is_match || raw_res.status_code != endpoint.expected_status {
+                let apm = crate::telemetry::ApmBackend::Jaeger {
+                    base_url: "http://localhost:16686".to_string(),
+                };
+                Some(apm.build_trace_link(tc))
+            } else {
+                None
+            };
+            (Some(trace_str), link)
+        } else {
+            (None, None)
+        };
+
         let report = DiffReport {
             endpoint_name: endpoint.name.clone(),
             differences,
             is_match,
             expected_status: endpoint.expected_status,
             actual_status: raw_res.status_code,
+            trace_context,
+            trace_link,
         };
 
         if !report.passed() {
@@ -327,12 +344,30 @@ pub async fn handle_review(
         };
         let differences = compare_json_ast(&stored_snapshot.masked_body, &actual_masked, &diff_options);
 
+        let (trace_context, trace_link) = if let Some(tc) = &raw_res.trace_context {
+            let trace_str = tc.to_traceparent_header();
+            let is_match = differences.is_empty();
+            let link = if !is_match || raw_res.status_code != endpoint.expected_status {
+                let apm = crate::telemetry::ApmBackend::Jaeger {
+                    base_url: "http://localhost:16686".to_string(),
+                };
+                Some(apm.build_trace_link(tc))
+            } else {
+                None
+            };
+            (Some(trace_str), link)
+        } else {
+            (None, None)
+        };
+
         let report = DiffReport {
             endpoint_name: endpoint.name.clone(),
             differences,
             is_match: stored_snapshot.masked_body == actual_masked,
             expected_status: endpoint.expected_status,
             actual_status: raw_res.status_code,
+            trace_context,
+            trace_link,
         };
 
         if !report.passed() {

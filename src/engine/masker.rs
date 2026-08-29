@@ -1,4 +1,5 @@
 use crate::config::{CustomMaskRule, MaskingConfig};
+use crate::engine::jit_rule::{fnv1a_hash, CompiledMatchFn, CraneliftRuleEngine};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
@@ -66,7 +67,7 @@ pub struct ParsedMaskRule {
 }
 
 /// Resolved masking context passed during recursive AST traversal.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MaskContext {
     pub enable_builtin_heuristics: bool,
     pub strict_pii_mode: bool,
@@ -74,6 +75,7 @@ pub struct MaskContext {
     pub unmask_allow_list: HashSet<String>,
     pub tokenized_rules: Vec<ParsedMaskRule>,
     pub precompiled_patterns: HashMap<String, Arc<Regex>>,
+    pub jit_match_fn: Option<CompiledMatchFn>,
 }
 
 impl MaskContext {
@@ -109,6 +111,18 @@ impl MaskContext {
 
         let unmask_allow_list: HashSet<String> = global_config.unmask_allow_list.iter().cloned().collect();
 
+        // 3. Compile JIT rule matcher for linear key paths (RFC-002 Cranelift Engine)
+        let mut jit_match_fn = None;
+        let paths: Vec<String> = tokenized_rules
+            .iter()
+            .map(|r| r.rule.json_path.clone())
+            .collect();
+
+        if !paths.is_empty() {
+            let mut engine = CraneliftRuleEngine::new();
+            jit_match_fn = Some(engine.compile_rules(&paths));
+        }
+
         Self {
             enable_builtin_heuristics: global_config.enable_builtin_heuristics,
             strict_pii_mode: global_config.strict_pii_mode,
@@ -116,6 +130,7 @@ impl MaskContext {
             unmask_allow_list,
             tokenized_rules,
             precompiled_patterns,
+            jit_match_fn,
         }
     }
 
@@ -187,7 +202,7 @@ fn mask_recursive(
         return;
     }
 
-    // 1. Check pre-tokenized JSONPath rules without string allocations
+    // 1. Check pre-tokenized / JIT compiled JSONPath rules
     if let Some(rule) = match_tokenized_rule(ctx, current_segments) {
         apply_custom_rule(val, rule, &ctx.precompiled_patterns);
         return;
@@ -263,6 +278,26 @@ fn is_leaf(val: &Value) -> bool {
 }
 
 fn match_tokenized_rule<'a>(ctx: &'a MaskContext, current: &[PathSegment]) -> Option<&'a CustomMaskRule> {
+    // Fast path: Cranelift JIT match for simple object paths (e.g. $.user.token)
+    if let Some(jit_fn) = ctx.jit_match_fn {
+        let is_key_only = current.iter().skip(1).all(|s| matches!(s, PathSegment::Key(_)));
+        if is_key_only && current.len() > 1 {
+            let hashes: Vec<u64> = current
+                .iter()
+                .skip(1)
+                .map(|s| match s {
+                    PathSegment::Key(k) => fnv1a_hash(k),
+                    _ => 0,
+                })
+                .collect();
+            let match_idx = unsafe { jit_fn(hashes.as_ptr(), hashes.len() as u64) };
+            if match_idx != u32::MAX && (match_idx as usize) < ctx.tokenized_rules.len() {
+                return Some(&ctx.tokenized_rules[match_idx as usize].rule);
+            }
+        }
+    }
+
+    // Standard fallback matching (with array wildcard support)
     for parsed in &ctx.tokenized_rules {
         if segments_match(&parsed.segments, current) {
             return Some(&parsed.rule);
@@ -300,71 +335,73 @@ fn segments_to_string_path(segments: &[PathSegment]) -> String {
     out
 }
 
-pub fn scan_unmasked_secrets(val: &Value) -> Result<(), String> {
-    scan_secrets_recursive(val, "$")
+fn apply_custom_rule(
+    val: &mut Value,
+    rule: &CustomMaskRule,
+    patterns: &HashMap<String, Arc<Regex>>,
+) {
+    if let Some(pattern_str) = &rule.pattern {
+        if let Some(re) = patterns.get(pattern_str) {
+            if let Value::String(s) = val {
+                *s = re.replace_all(s, rule.replacement.as_str()).to_string();
+            }
+        }
+    } else {
+        *val = Value::String(rule.replacement.clone());
+    }
 }
 
-fn scan_secrets_recursive(val: &Value, path: &str) -> Result<(), String> {
+pub fn is_credit_card_luhn(s: &str) -> bool {
+    let digits: Vec<u32> = s.chars().filter_map(|c| c.to_digit(10)).collect();
+    if digits.len() < 13 || digits.len() > 19 {
+        return false;
+    }
+    let mut sum = 0;
+    let mut alternate = false;
+    for &d in digits.iter().rev() {
+        let mut val = d;
+        if alternate {
+            val *= 2;
+            if val > 9 {
+                val -= 9;
+            }
+        }
+        sum += val;
+        alternate = !alternate;
+    }
+    sum % 10 == 0
+}
+
+pub fn scan_unmasked_secrets(val: &Value) -> Result<(), String> {
+    scan_recursive(val, "$")
+}
+
+fn scan_recursive(val: &Value, path: &str) -> Result<(), String> {
     match val {
         Value::Object(map) => {
             for (k, v) in map {
-                scan_secrets_recursive(v, &format!("{path}.{k}"))?;
+                let child_path = format!("{path}.{k}");
+                scan_recursive(v, &child_path)?;
             }
         }
         Value::Array(arr) => {
             for (idx, v) in arr.iter().enumerate() {
-                scan_secrets_recursive(v, &format!("{path}[{idx}]"))?;
+                let child_path = format!("{path}[{idx}]");
+                scan_recursive(v, &child_path)?;
             }
         }
         Value::String(s) => {
+            if s.starts_with("<MASKED_") && s.ends_with('>') {
+                return Ok(());
+            }
             if AWS_KEY_REGEX.is_match(s) {
-                return Err(format!("Unmasked AWS Access Key detected at '{path}': {s}"));
+                return Err(format!("Unmasked AWS Access Key detected at '{path}'"));
             }
             if PRIVATE_KEY_HEADER.is_match(s) {
-                return Err(format!("Unmasked Private Key Header detected at '{path}'"));
+                return Err(format!("Unmasked RSA/EC Private Key block detected at '{path}'"));
             }
         }
         _ => {}
     }
     Ok(())
-}
-
-fn is_credit_card_luhn(s: &str) -> bool {
-    let sanitized: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
-    if sanitized.len() < 13 || sanitized.len() > 19 {
-        return false;
-    }
-
-    let mut sum = 0;
-    let mut alternate = false;
-    for ch in sanitized.chars().rev() {
-        let mut digit = ch.to_digit(10).unwrap();
-        if alternate {
-            digit *= 2;
-            if digit > 9 {
-                digit -= 9;
-            }
-        }
-        sum += digit;
-        alternate = !alternate;
-    }
-
-    sum % 10 == 0
-}
-
-fn apply_custom_rule(
-    val: &mut Value,
-    rule: &CustomMaskRule,
-    precompiled_patterns: &HashMap<String, Arc<Regex>>,
-) {
-    if let Some(pattern_str) = &rule.pattern {
-        if let Some(regex) = precompiled_patterns.get(pattern_str) {
-            if let Value::String(s) = val {
-                let replaced = regex.replace_all(s, &rule.replacement).to_string();
-                *s = replaced;
-                return;
-            }
-        }
-    }
-    *val = Value::String(rule.replacement.clone());
 }

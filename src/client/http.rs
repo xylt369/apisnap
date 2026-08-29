@@ -3,6 +3,7 @@ use crate::client::{RawResponse, RequestExecutor};
 use crate::config::{EndpointConfig, HttpMethod};
 use crate::engine::FastJsonEngine;
 use crate::error::ApiSnapError;
+use crate::telemetry::{inject_trace_header, TraceContext};
 use async_trait::async_trait;
 use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::Value;
@@ -111,7 +112,11 @@ impl RequestExecutor for ReqwestExecutor {
         let target_url = self.resolve_url(base_url, &endpoint.path);
         let mut req = self.client.request(method, &target_url);
 
-        // Apply global headers first
+        // 1. Automatic W3C Distributed Tracing Injection (RFC-002 Module 5)
+        let trace_ctx = TraceContext::new_root();
+        req = inject_trace_header(req, &trace_ctx);
+
+        // 2. Apply global headers first
         for (k, v) in global_headers {
             let h_name = HeaderName::from_str(k).map_err(|e| ApiSnapError::InvalidConfig {
                 location: format!("global_headers.{}", k),
@@ -124,7 +129,7 @@ impl RequestExecutor for ReqwestExecutor {
             req = req.header(h_name, h_val);
         }
 
-        // Apply per-endpoint headers (override global)
+        // 3. Apply per-endpoint headers (override global)
         for (k, v) in &endpoint.headers {
             let h_name = HeaderName::from_str(k).map_err(|e| ApiSnapError::InvalidConfig {
                 location: format!("endpoint '{}'.headers.{}", endpoint.name, k),
@@ -197,6 +202,7 @@ impl RequestExecutor for ReqwestExecutor {
                 status_code,
                 headers,
                 duration_ms,
+                trace_context: Some(trace_ctx),
             });
         }
 
@@ -224,6 +230,7 @@ impl RequestExecutor for ReqwestExecutor {
             status_code,
             headers,
             duration_ms,
+            trace_context: Some(trace_ctx),
         })
     }
 }

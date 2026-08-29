@@ -8,6 +8,7 @@ pub use http::*;
 
 use crate::config::EndpointConfig;
 use crate::error::ApiSnapError;
+use crate::telemetry::TraceContext;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -18,6 +19,7 @@ pub struct RawResponse {
     pub status_code: u16,
     pub headers: HashMap<String, String>,
     pub duration_ms: u64,
+    pub trace_context: Option<TraceContext>,
 }
 
 #[async_trait]

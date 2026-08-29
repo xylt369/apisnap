@@ -341,6 +341,7 @@ impl GrpcExecutor {
             headers: response_headers,
             body: body_val,
             duration_ms,
+            trace_context: Some(crate::telemetry::TraceContext::new_root()),
         })
     }
 }

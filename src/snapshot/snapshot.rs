@@ -1,6 +1,7 @@
 use crate::crypto::SnapshotEncryptor;
 use crate::engine::scan_unmasked_secrets;
 use crate::error::ApiSnapError;
+use crate::storage::{MerkleCasStore, NodeHash};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -28,11 +29,13 @@ pub struct SnapshotFile {
     pub masked_body: serde_json::Value,
 }
 
-/// Storage manager for snapshot files with atomic write guarantees, secret defense, and optional AES-256-GCM encryption.
+/// Storage manager for snapshot files with atomic write guarantees, secret defense,
+/// AES-256-GCM encryption, and Merkle DAG CAS deduplication.
 pub struct SnapshotStore {
     base_dir: PathBuf,
     pre_write_secret_scan: bool,
     encryptor: Option<SnapshotEncryptor>,
+    enable_cas: bool,
 }
 
 impl SnapshotStore {
@@ -41,6 +44,7 @@ impl SnapshotStore {
             base_dir: base_dir.as_ref().to_path_buf(),
             pre_write_secret_scan: true,
             encryptor: None,
+            enable_cas: false,
         }
     }
 
@@ -51,6 +55,11 @@ impl SnapshotStore {
 
     pub fn with_encryptor(mut self, encryptor: Option<SnapshotEncryptor>) -> Self {
         self.encryptor = encryptor;
+        self
+    }
+
+    pub fn with_cas(mut self, enabled: bool) -> Self {
+        self.enable_cas = enabled;
         self
     }
 
@@ -109,7 +118,8 @@ impl SnapshotStore {
         })
     }
 
-    /// Atomically write a snapshot file with pre-write secret defense and optional encryption.
+    /// Atomically write a snapshot file with pre-write secret defense, optional encryption,
+    /// and transparent Merkle CAS subtree deduplication.
     pub fn write_snapshot_atomic(
         &self,
         snapshot: &SnapshotFile,
@@ -127,6 +137,19 @@ impl SnapshotStore {
         if !self.base_dir.exists() {
             fs::create_dir_all(&self.base_dir).map_err(|e| ApiSnapError::Io {
                 path: self.base_dir.display().to_string(),
+                source: e,
+            })?;
+        }
+
+        // Transparent CAS Ingestion if CAS is enabled
+        if self.enable_cas {
+            let cas_dir = self.base_dir.join(".cas");
+            let mut cas_store = MerkleCasStore::new(&cas_dir).map_err(|e| ApiSnapError::Io {
+                path: cas_dir.display().to_string(),
+                source: e,
+            })?;
+            let _ = cas_store.ingest(&snapshot.masked_body).map_err(|e| ApiSnapError::Io {
+                path: cas_dir.display().to_string(),
                 source: e,
             })?;
         }
@@ -172,6 +195,26 @@ impl SnapshotStore {
         })?;
 
         Ok(final_path)
+    }
+
+    /// Explicit Merkle DAG CAS deduplicated ingestion (RFC-002 Module 1).
+    pub fn write_snapshot_cas(
+        &self,
+        snapshot: &SnapshotFile,
+    ) -> Result<(PathBuf, NodeHash), ApiSnapError> {
+        let cas_dir = self.base_dir.join(".cas");
+        let mut cas_store = MerkleCasStore::new(&cas_dir).map_err(|e| ApiSnapError::Io {
+            path: cas_dir.display().to_string(),
+            source: e,
+        })?;
+
+        let root_hash = cas_store.ingest(&snapshot.masked_body).map_err(|e| ApiSnapError::Io {
+            path: cas_dir.display().to_string(),
+            source: e,
+        })?;
+
+        let file_path = self.write_snapshot_atomic(snapshot)?;
+        Ok((file_path, root_hash))
     }
 }
 
