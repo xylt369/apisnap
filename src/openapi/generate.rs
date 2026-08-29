@@ -30,10 +30,47 @@ pub fn generate_openapi_spec(
         let response_schema = infer_schema_from_value(&snapshot.masked_body);
         let status_str = snapshot.metadata.status_code.to_string();
 
-        let operation = json!({
-            "summary": endpoint.name,
-            "operationId": endpoint.name,
-            "responses": {
+        let mut operation_map = Map::new();
+        operation_map.insert("summary".into(), json!(endpoint.name));
+        operation_map.insert("operationId".into(), json!(endpoint.name));
+
+        // 1. Query Parameters
+        if !endpoint.query_params.is_empty() {
+            let mut params_vec = Vec::new();
+            for (k, v) in &endpoint.query_params {
+                params_vec.push(json!({
+                    "name": k,
+                    "in": "query",
+                    "required": false,
+                    "schema": {
+                        "type": "string",
+                        "example": v
+                    }
+                }));
+            }
+            operation_map.insert("parameters".into(), Value::Array(params_vec));
+        }
+
+        // 2. Request Body
+        if let Some(body_val) = &endpoint.body {
+            let body_schema = infer_schema_from_value(body_val);
+            operation_map.insert(
+                "requestBody".into(),
+                json!({
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": body_schema
+                        }
+                    }
+                }),
+            );
+        }
+
+        // 3. Response Schema
+        operation_map.insert(
+            "responses".into(),
+            json!({
                 status_str: {
                     "description": format!("HTTP {} response recorded by ApiSnap", snapshot.metadata.status_code),
                     "content": {
@@ -42,15 +79,15 @@ pub fn generate_openapi_spec(
                         }
                     }
                 }
-            }
-        });
+            }),
+        );
 
         let path_item = paths_map
             .entry(path_key.clone())
             .or_insert_with(|| Value::Object(Map::new()));
 
         if let Value::Object(ref mut item_obj) = path_item {
-            item_obj.insert(method_key, operation);
+            item_obj.insert(method_key, Value::Object(operation_map));
         }
     }
 

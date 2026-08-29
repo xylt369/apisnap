@@ -1,4 +1,4 @@
-use crate::client::AuthConfig;
+use crate::client::{AuthConfig, GrpcEndpointConfig};
 use crate::error::ApiSnapError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -70,10 +70,20 @@ fn default_true() -> bool {
     true
 }
 
+/// Supported transport protocols.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    #[default]
+    Http,
+    Grpc,
+}
+
 /// HTTP verbs supported by the dispatcher.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum HttpMethod {
+    #[default]
     Get,
     Post,
     Put,
@@ -101,8 +111,18 @@ impl std::fmt::Display for HttpMethod {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EndpointConfig {
     pub name: String,
+
+    #[serde(default)]
+    pub protocol: Protocol,
+
+    #[serde(default)]
     pub method: HttpMethod,
+
+    #[serde(default)]
     pub path: String,
+
+    #[serde(default)]
+    pub grpc: Option<GrpcEndpointConfig>,
 
     #[serde(default)]
     pub headers: HashMap<String, String>,
@@ -222,18 +242,7 @@ snapshot_dir = "__snapshots__"
 
 [global_headers]
 "Accept" = "application/json"
-"User-Agent" = "ApiSnap/0.3.0"
-
-# Optional Enterprise Auth
-# [auth]
-# type = "bearer"
-# token = "secret_token_123"
-
-# [auth]
-# type = "oauth2_client_credentials"
-# token_url = "https://auth.example.com/oauth/token"
-# client_id = "apisnap_client"
-# client_secret = "secret_xyz"
+"User-Agent" = "ApiSnap/1.0.0"
 
 [masking]
 enable_builtin_heuristics = true

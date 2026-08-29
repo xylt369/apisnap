@@ -1,6 +1,6 @@
 use crate::client::auth::{create_auth_provider, AuthProvider};
-use crate::client::{RawResponse, RequestExecutor, ReqwestExecutor};
-use crate::config::{ApiSnapConfig, EndpointConfig};
+use crate::client::{GrpcExecutor, RawResponse, RequestExecutor, ReqwestExecutor};
+use crate::config::{ApiSnapConfig, EndpointConfig, Protocol};
 use crate::crypto::SnapshotEncryptor;
 use crate::engine::{compare_json_ast, mask_value, DiffOptions, DiffReport, MaskContext};
 use crate::error::ApiSnapError;
@@ -52,6 +52,7 @@ pub async fn handle_record(
         .with_secret_scan(config.masking.pre_write_secret_scan)
         .with_encryptor(encryptor);
     let executor = Arc::new(ReqwestExecutor::new(config.timeout));
+    let grpc_executor = Arc::new(GrpcExecutor::new(config.timeout));
 
     let global_auth = config
         .auth
@@ -75,6 +76,7 @@ pub async fn handle_record(
     let progress = create_progress_bar(filtered_endpoints.len() as u64);
     let results = dispatch_requests(
         executor,
+        grpc_executor,
         &config.base_url,
         &config.global_headers,
         global_auth,
@@ -142,6 +144,7 @@ pub async fn handle_test(
         .with_secret_scan(config.masking.pre_write_secret_scan)
         .with_encryptor(encryptor);
     let executor = Arc::new(ReqwestExecutor::new(config.timeout));
+    let grpc_executor = Arc::new(GrpcExecutor::new(config.timeout));
 
     let global_auth = config
         .auth
@@ -163,6 +166,7 @@ pub async fn handle_test(
 
     let results = dispatch_requests(
         executor,
+        grpc_executor,
         &config.base_url,
         &config.global_headers,
         global_auth,
@@ -244,6 +248,7 @@ pub async fn handle_review(
         .with_secret_scan(config.masking.pre_write_secret_scan)
         .with_encryptor(encryptor);
     let executor = Arc::new(ReqwestExecutor::new(config.timeout));
+    let grpc_executor = Arc::new(GrpcExecutor::new(config.timeout));
 
     let global_auth = config
         .auth
@@ -261,6 +266,7 @@ pub async fn handle_review(
 
     let results = dispatch_requests(
         executor,
+        grpc_executor,
         &config.base_url,
         &config.global_headers,
         global_auth,
@@ -465,6 +471,7 @@ fn filter_endpoints(
 
 async fn dispatch_requests(
     executor: Arc<dyn RequestExecutor>,
+    grpc_executor: Arc<GrpcExecutor>,
     base_url: &str,
     global_headers: &std::collections::HashMap<String, String>,
     global_auth: Option<Arc<dyn AuthProvider>>,
@@ -482,12 +489,22 @@ async fn dispatch_requests(
     while join_set.len() < concurrency && !queue.is_empty() {
         if let Some(endpoint) = queue.pop_front() {
             let exec = Arc::clone(&executor);
+            let grpc_exec = Arc::clone(&grpc_executor);
             let b_url = base_url.clone();
             let g_headers = global_headers.clone();
             let g_auth = global_auth.clone();
 
             join_set.spawn(async move {
-                let res = exec.execute(&endpoint, &b_url, &g_headers, g_auth).await;
+                let res = match endpoint.protocol {
+                    Protocol::Http => exec.execute(&endpoint, &b_url, &g_headers, g_auth).await,
+                    Protocol::Grpc => {
+                        if let Some(grpc_cfg) = &endpoint.grpc {
+                            grpc_exec.execute_grpc(&endpoint, grpc_cfg, &b_url).await
+                        } else {
+                            exec.execute(&endpoint, &b_url, &g_headers, g_auth).await
+                        }
+                    }
+                };
                 (endpoint, res)
             });
         }
@@ -500,12 +517,22 @@ async fn dispatch_requests(
 
             if let Some(next_ep) = queue.pop_front() {
                 let exec = Arc::clone(&executor);
+                let grpc_exec = Arc::clone(&grpc_executor);
                 let b_url = base_url.clone();
                 let g_headers = global_headers.clone();
                 let g_auth = global_auth.clone();
 
                 join_set.spawn(async move {
-                    let res = exec.execute(&next_ep, &b_url, &g_headers, g_auth).await;
+                    let res = match next_ep.protocol {
+                        Protocol::Http => exec.execute(&next_ep, &b_url, &g_headers, g_auth).await,
+                        Protocol::Grpc => {
+                            if let Some(grpc_cfg) = &next_ep.grpc {
+                                grpc_exec.execute_grpc(&next_ep, grpc_cfg, &b_url).await
+                            } else {
+                                exec.execute(&next_ep, &b_url, &g_headers, g_auth).await
+                            }
+                        }
+                    };
                     (next_ep, res)
                 });
             }

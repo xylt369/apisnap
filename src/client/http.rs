@@ -1,5 +1,6 @@
 use crate::client::auth::{create_auth_provider, AuthProvider};
 use crate::config::{EndpointConfig, HttpMethod};
+use crate::engine::FastJsonEngine;
 use crate::error::ApiSnapError;
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -35,6 +36,7 @@ pub trait RequestExecutor: Send + Sync {
 pub struct ReqwestExecutor {
     client: reqwest::Client,
     default_timeout: Duration,
+    fast_engine: Arc<FastJsonEngine>,
 }
 
 impl ReqwestExecutor {
@@ -51,6 +53,7 @@ impl ReqwestExecutor {
         Self {
             client,
             default_timeout,
+            fast_engine: Arc::new(FastJsonEngine::default()),
         }
     }
 
@@ -95,6 +98,7 @@ impl ReqwestExecutor {
         Ok(Self {
             client,
             default_timeout,
+            fast_engine: Arc::new(FastJsonEngine::default()),
         })
     }
 }
@@ -196,10 +200,13 @@ impl RequestExecutor for ReqwestExecutor {
         let body_val: Value = if body_bytes.is_empty() {
             Value::Null
         } else {
-            serde_json::from_slice(&body_bytes).unwrap_or_else(|_| {
-                let s = String::from_utf8_lossy(&body_bytes).to_string();
-                Value::String(s)
-            })
+            let mut mutable_bytes = body_bytes.to_vec();
+            self.fast_engine
+                .parse_slice(&mut mutable_bytes)
+                .unwrap_or_else(|_| {
+                    let s = String::from_utf8_lossy(&body_bytes).to_string();
+                    Value::String(s)
+                })
         };
 
         Ok(RawResponse {
