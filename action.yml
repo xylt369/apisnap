@@ -1,0 +1,79 @@
+name: 'ApiSnap Action'
+description: 'Fast, deterministic API snapshot regression testing and PR contract guard in GitHub Actions'
+author: 'xylt369'
+branding:
+  icon: 'camera'
+  color: 'blue'
+
+inputs:
+  config:
+    description: 'Path to apisnap.toml or apisnap.yaml configuration file'
+    required: false
+    default: 'apisnap.toml'
+  endpoint:
+    description: 'Optional filter to test only a specific endpoint by name'
+    required: false
+    default: ''
+  concurrency:
+    description: 'Concurrency level for parallel requests'
+    required: false
+    default: '10'
+  comment-on-pr:
+    description: 'Whether to post a rich diff report comment on the Pull Request'
+    required: false
+    default: 'true'
+  github-token:
+    description: 'GitHub token for posting PR comments'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  passed:
+    description: 'Whether all API snapshots matched (true/false)'
+    value: ${{ steps.run-apisnap.outputs.passed }}
+  diff-count:
+    description: 'Total number of detected snapshot mismatches'
+    value: ${{ steps.run-apisnap.outputs.diff_count }}
+  report-json:
+    description: 'Machine-readable JSON diff report'
+    value: ${{ steps.run-apisnap.outputs.report_json }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Run ApiSnap Test
+      id: run-apisnap
+      shell: bash
+      run: |
+        echo "::group::Running ApiSnap Regression Suite"
+        
+        CMD="cargo run --release -- test --config '${{ inputs.config }}' --concurrency ${{ inputs.concurrency }} --ci"
+        if [ -n "${{ inputs.endpoint }}" ]; then
+          CMD="$CMD --endpoint '${{ inputs.endpoint }}'"
+        fi
+        
+        # Execute and capture JSON output
+        set +e
+        OUTPUT=$(eval $CMD)
+        EXIT_CODE=$?
+        set -e
+        
+        echo "report_json<<EOF" >> $GITHUB_OUTPUT
+        echo "$OUTPUT" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+        
+        if [ $EXIT_CODE -eq 0 ]; then
+          echo "passed=true" >> $GITHUB_OUTPUT
+          echo "diff_count=0" >> $GITHUB_OUTPUT
+          echo "✅ All API snapshots matched perfectly!"
+        else
+          echo "passed=false" >> $GITHUB_OUTPUT
+          echo "❌ Snapshot regression detected!"
+        fi
+        
+        echo "::endgroup::"
+        
+        # Pass or fail exit code
+        if [ $EXIT_CODE -ne 0 ]; then
+          exit $EXIT_CODE
+        fi
