@@ -1,0 +1,153 @@
+{
+  "name": "apisnap-vscode",
+  "displayName": "ApiSnap Pro — API Snapshot Regression Guard",
+  "description": "The official VS Code extension for ApiSnap. Live snapshot previews, inline CodeLens, side-by-side AST diffing, and one-click snapshot updates.",
+  "version": "0.1.0",
+  "publisher": "xylt369",
+  "license": "MIT",
+  "icon": "assets/icon.png",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Testing",
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "api",
+    "snapshot",
+    "testing",
+    "regression",
+    "rest",
+    "grpc",
+    "diff"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "apisnap.runTest",
+        "title": "ApiSnap: Run Snapshot Tests",
+        "icon": "$(play)"
+      },
+      {
+        "command": "apisnap.recordAll",
+        "title": "ApiSnap: Record Fresh Snapshots",
+        "icon": "$(record)"
+      },
+      {
+        "command": "apisnap.reviewDiffs",
+        "title": "ApiSnap: Interactive Review in Terminal",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "apisnap.openSnapshot",
+        "title": "ApiSnap: Open Snapshot File"
+      },
+      {
+        "command": "apisnap.acceptSnapshot",
+        "title": "ApiSnap: Accept / Update Snapshot",
+        "icon": "$(check)"
+      },
+      {
+        "command": "apisnap.activatePro",
+        "title": "ApiSnap: Activate Pro License Key",
+        "icon": "$(key)"
+      },
+      {
+        "command": "apisnap.refreshTree",
+        "title": "ApiSnap: Refresh Snapshots",
+        "icon": "$(refresh)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "apisnap-explorer",
+          "title": "ApiSnap",
+          "icon": "$(camera)"
+        }
+      ]
+    },
+    "views": {
+      "apisnap-explorer": [
+        {
+          "id": "apisnap.snapshotList",
+          "name": "API Snapshots"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "apisnap.runTest",
+          "when": "view == apisnap.snapshotList",
+          "group": "navigation"
+        },
+        {
+          "command": "apisnap.recordAll",
+          "when": "view == apisnap.snapshotList",
+          "group": "navigation"
+        },
+        {
+          "command": "apisnap.refreshTree",
+          "when": "view == apisnap.snapshotList",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "apisnap.openSnapshot",
+          "when": "view == apisnap.snapshotList",
+          "group": "inline"
+        },
+        {
+          "command": "apisnap.acceptSnapshot",
+          "when": "view == apisnap.snapshotList",
+          "group": "inline"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "ApiSnap",
+      "properties": {
+        "apisnap.configPath": {
+          "type": "string",
+          "default": "apisnap.toml",
+          "description": "Path to apisnap configuration file relative to workspace root."
+        },
+        "apisnap.cliPath": {
+          "type": "string",
+          "default": "apisnap",
+          "description": "Path to the apisnap binary (defaults to 'apisnap' in PATH or cargo run)."
+        },
+        "apisnap.proLicenseKey": {
+          "type": "string",
+          "default": "",
+          "description": "Your ApiSnap Pro lifetime license key."
+        },
+        "apisnap.enableCodeLens": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inline CodeLens above route definitions in Python, Go, Rust, and TypeScript."
+        },
+        "apisnap.autoRunOnSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically run snapshot tests whenever an apisnap configuration or backend route file is saved."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.x",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.5.2"
+  }
+}

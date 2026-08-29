@@ -1,0 +1,38 @@
+name: Bug Report
+description: Create a report to help us reproduce and fix a bug in ApiSnap
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report!
+  - type: input
+    id: version
+    attributes:
+      label: ApiSnap Version
+      description: What version of ApiSnap are you using? (`apisnap --version`)
+      placeholder: e.g. 0.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Please describe the issue you encountered.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Provide an `apisnap.toml` and sample response or steps to reproduce the behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen instead?
+    validations:
+      required: true

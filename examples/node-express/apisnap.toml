@@ -1,0 +1,28 @@
+base_url = "http://127.0.0.1:3000"
+timeout = "10s"
+concurrency = 5
+snapshot_dir = "__snapshots__"
+
+[global_headers]
+"Accept" = "application/json"
+
+[masking]
+enable_builtin_heuristics = true
+
+[[endpoints]]
+name = "get_session"
+method = "GET"
+path = "/api/v1/session"
+expected_status = 200
+
+[[endpoints]]
+name = "send_message"
+method = "POST"
+path = "/api/v1/messages"
+expected_status = 201
+
+[endpoints.headers]
+"Content-Type" = "application/json"
+
+[endpoints.body]
+text = "Snapshot testing is awesome"
