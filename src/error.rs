@@ -41,6 +41,16 @@ pub enum ApiSnapError {
         diff_count: usize,
     },
 
+    #[error("fuzzing anomaly detected: {total_anomalies} server crash/leak anomaly(ies)")]
+    FuzzAnomalyDetected {
+        total_anomalies: usize,
+    },
+
+    #[error("OpenAPI contract drift detected: {drift_count} schema violation(s)")]
+    OpenApiDrift {
+        drift_count: usize,
+    },
+
     #[error("execution error: {0}")]
     Execution(String),
 }
@@ -48,7 +58,9 @@ pub enum ApiSnapError {
 impl ApiSnapError {
     pub fn exit_code(&self) -> i32 {
         match self {
-            ApiSnapError::DiffMismatch { .. } => 1,
+            ApiSnapError::DiffMismatch { .. }
+            | ApiSnapError::FuzzAnomalyDetected { .. }
+            | ApiSnapError::OpenApiDrift { .. } => 1,
             ApiSnapError::Network { .. } | ApiSnapError::Timeout { .. } => 2,
             ApiSnapError::Io { .. }
             | ApiSnapError::InvalidConfig { .. }

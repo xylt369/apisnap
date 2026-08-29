@@ -1,6 +1,7 @@
 use apisnap::cli::{
-    handle_fuzz, handle_init, handle_openapi_generate, handle_openapi_verify, handle_record,
-    handle_review, handle_test, Cli, Commands, OpenApiActions,
+    handle_cas, handle_fuzz, handle_init, handle_openapi_generate, handle_openapi_verify,
+    handle_record, handle_review, handle_shadow, handle_sniff, handle_test, Cli, Commands,
+    OpenApiActions,
 };
 use clap::Parser;
 
@@ -11,7 +12,7 @@ async fn main() {
     let result = match cli.command {
         Commands::Init(args) => handle_init(&args.output),
         Commands::Record(args) => {
-            handle_record(&args.config, args.endpoint.as_deref(), args.concurrency).await
+            handle_record(&args.config, args.endpoint.as_deref(), args.concurrency, args.cas).await
         }
         Commands::Test(args) => {
             handle_test(
@@ -35,6 +36,9 @@ async fn main() {
                 handle_openapi_verify(&args.config, &args.spec, args.live).await
             }
         },
+        Commands::Cas(args) => handle_cas(&args),
+        Commands::Sniff(args) => handle_sniff(&args).await,
+        Commands::Shadow(args) => handle_shadow(&args).await,
     };
 
     if let Err(err) = result {

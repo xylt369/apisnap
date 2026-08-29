@@ -31,6 +31,15 @@ pub enum Commands {
 
     /// Bidirectional OpenAPI 3.1 synchronization and contract drift verification
     Openapi(OpenApiSubcommand),
+
+    /// Merkle DAG Content-Addressable Storage (CAS) inspection and deduplication management
+    Cas(CasArgs),
+
+    /// Passive zero-overhead kernel traffic sniffing via Linux eBPF TC egress hooks
+    Sniff(SniffArgs),
+
+    /// Envoy / Proxy-Wasm real-time shadow traffic differ proxy
+    Shadow(ShadowArgs),
 }
 
 #[derive(Debug, Args)]
@@ -53,6 +62,10 @@ pub struct RecordArgs {
     /// Concurrency override
     #[arg(short, long)]
     pub concurrency: Option<usize>,
+
+    /// Enable Merkle DAG Content-Addressable Storage (CAS) deduplication
+    #[arg(long)]
+    pub cas: bool,
 }
 
 #[derive(Debug, Args)]
@@ -139,4 +152,53 @@ pub struct OpenApiVerifyArgs {
     /// Query live endpoints in real time rather than reading stored snapshots
     #[arg(long)]
     pub live: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct CasArgs {
+    /// CAS directory path
+    #[arg(short, long, default_value = "__snapshots__/.cas")]
+    pub dir: String,
+
+    #[command(subcommand)]
+    pub action: CasAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CasAction {
+    /// Print statistics on deduplication ratio and stored chunk count
+    Stats,
+
+    /// Reconstruct and print full JSON AST for a given 64-character hex NodeHash
+    Inspect { hash: String },
+}
+
+#[derive(Debug, Args)]
+pub struct SniffArgs {
+    /// Target network port to capture (e.g. 80, 8080, 3000)
+    #[arg(short, long, default_value = "8080")]
+    pub port: u16,
+
+    /// Snapshot output directory
+    #[arg(short, long, default_value = "__snapshots__")]
+    pub output_dir: String,
+
+    /// Maximum number of packets to capture before stopping
+    #[arg(short, long, default_value = "10")]
+    pub count: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct ShadowArgs {
+    /// Base URL of the baseline upstream service
+    #[arg(long, default_value = "http://localhost:8080")]
+    pub baseline: String,
+
+    /// Base URL of the candidate upstream service
+    #[arg(long, default_value = "http://localhost:8081")]
+    pub candidate: String,
+
+    /// Local port to listen for incoming shadow proxy traffic
+    #[arg(short, long, default_value = "18000")]
+    pub listen_port: u16,
 }

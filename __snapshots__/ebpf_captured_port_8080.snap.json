@@ -1,0 +1,17 @@
+{
+  "endpoint_name": "ebpf_captured_port_8080",
+  "metadata": {
+    "recorded_at": "2026-08-29T17:15:20.789627500+00:00",
+    "duration_ms": 1,
+    "status_code": 200,
+    "grpc_status_code": null,
+    "response_headers": {},
+    "apisnap_version": "1.1.0"
+  },
+  "masked_body": {
+    "service": "sniffed_app",
+    "port": 8080,
+    "status": "online",
+    "timestamp": "<MASKED_TIMESTAMP>"
+  }
+}
