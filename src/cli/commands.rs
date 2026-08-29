@@ -3,7 +3,6 @@ use crate::client::auth::{create_auth_provider, AuthProvider};
 use crate::client::{GrpcExecutor, RequestExecutor, ReqwestExecutor};
 use crate::config::{ApiSnapConfig, EndpointConfig, Protocol};
 use crate::crypto::SnapshotEncryptor;
-use crate::ebpf::extract_http_json_body;
 use crate::engine::{compare_json_ast, mask_value, DiffOptions, DiffReport, MaskContext};
 use crate::error::ApiSnapError;
 use crate::fuzz::{render_fuzz_report, FuzzEngine};
@@ -11,7 +10,6 @@ use crate::openapi::{generate_openapi_spec, verify_openapi_live, verify_openapi_
 use crate::snapshot::{SnapshotFile, SnapshotMetadata, SnapshotStore};
 use crate::storage::{MerkleCasStore, NodeHash};
 use crate::ui::{generate_pr_comment_markdown, print_summary_report, run_interactive_review, ReviewItem};
-use crate::wasm::shadow_filter::ShadowSession;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::VecDeque;
@@ -572,78 +570,23 @@ pub fn handle_cas(args: &CasArgs) -> Result<(), ApiSnapError> {
 }
 
 pub async fn handle_sniff(args: &SniffArgs) -> Result<(), ApiSnapError> {
+    let engine = crate::ebpf::EbpfSnifferEngine::new(args.port, &args.output_dir, args.count);
+    let captured = engine.run().await?;
     println!(
-        "\n{} Attaching passive eBPF TC egress kernel sniffer on port {} (max packets: {})...",
-        "ApiSnap eBPF".cyan().bold(),
-        args.port.to_string().yellow().bold(),
-        args.count
+        "\n{} eBPF sniffing session complete. Captured {} live TCP/HTTP session(s).",
+        "[SUCCESS]".green().bold(),
+        captured
     );
-    println!("  Output directory: {}", args.output_dir.cyan());
-    println!("  Listening to kernel ring buffer events (BPF_MAP_TYPE_RINGBUF)...");
-
-    let mut captured_count = 0;
-    // Simulate real captured streams on port
-    let dummy_packet_payload = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{{\"service\":\"sniffed_app\",\"port\":{},\"status\":\"online\",\"timestamp\":\"2026-08-30T00:00:00Z\"}}",
-        args.port
-    );
-    let raw_bytes = dummy_packet_payload.as_bytes();
-
-    if let Some(json_slice) = extract_http_json_body(raw_bytes) {
-        if let Ok(mut json_val) = serde_json::from_slice::<serde_json::Value>(json_slice) {
-            let mask_ctx = MaskContext::new(&crate::config::MaskingConfig::default(), &[]);
-            mask_value(&mut json_val, &mask_ctx);
-
-            let store = SnapshotStore::new(&args.output_dir);
-            let snapshot = SnapshotFile {
-                endpoint_name: format!("ebpf_captured_port_{}", args.port),
-                metadata: SnapshotMetadata {
-                    recorded_at: chrono::Utc::now().to_rfc3339(),
-                    duration_ms: 1,
-                    status_code: 200,
-                    grpc_status_code: None,
-                    response_headers: Default::default(),
-                    apisnap_version: env!("CARGO_PKG_VERSION").to_string(),
-                },
-                masked_body: json_val,
-            };
-            let path = store.write_snapshot_atomic(&snapshot)?;
-            captured_count += 1;
-            println!(
-                "  {} Sniffed TCP stream -> Parsed HTTP JSON -> Recorded to {}",
-                "[CAPTURED]".green().bold(),
-                path.display().to_string().cyan()
-            );
-        }
-    }
-
-    println!("\n{} eBPF sniffing session complete. Captured {} packet(s).", "[SUCCESS]".green().bold(), captured_count);
     Ok(())
 }
 
 pub async fn handle_shadow(args: &ShadowArgs) -> Result<(), ApiSnapError> {
-    println!(
-        "\n{} Starting Envoy Proxy-Wasm Shadow Differ Gateway on port {}...",
-        "ApiSnap Shadow".cyan().bold(),
-        args.listen_port.to_string().yellow().bold()
+    let server = crate::wasm::ShadowProxyServer::new(
+        &args.baseline,
+        &args.candidate,
+        args.listen_port,
     );
-    println!("  Baseline  Cluster: {}", args.baseline.cyan());
-    println!("  Candidate Cluster: {}", args.candidate.cyan());
-    println!("  Streaming AST Differ: Activated (SIMD-JSON zero-copy structural comparator)");
-
-    let mut session = ShadowSession::new(1001);
-    let sample_baseline = br#"{"status": "ok", "user": {"id": 1, "role": "admin"}}"#;
-    let sample_candidate = br#"{"status": "ok", "user": {"id": 2, "role": "admin"}}"#;
-
-    session.on_body_chunk("baseline", sample_baseline, true);
-    session.on_body_chunk("candidate", sample_candidate, true);
-
-    let drifted = session.check_structural_drift().unwrap_or(false);
-    println!(
-        "  Session [1001] Line-Rate Compare Result: {}",
-        if drifted { "DRIFT DETECTED".red().bold() } else { "MATCH (0 Structural Drift)".green().bold() }
-    );
-
+    server.run().await?;
     Ok(())
 }
 

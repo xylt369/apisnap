@@ -1,3 +1,7 @@
+pub mod sniffer;
+
+pub use sniffer::*;
+
 use serde_json::Value;
 
 #[repr(C)]

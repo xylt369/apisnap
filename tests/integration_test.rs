@@ -289,3 +289,37 @@ fn test_rfc002_ebpf_packet_parsing() {
     let parsed = parse_captured_event(&pkt).unwrap();
     assert_eq!(parsed["order_id"], "ORD-99");
 }
+
+/// 11. Live eBPF Stream Sniffer Engine & Automated Snapshot Generation Test
+#[tokio::test]
+async fn test_ebpf_live_stream_sniffer_session() {
+    use apisnap::ebpf::EbpfSnifferEngine;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpStream;
+
+    let temp_dir = tempdir().unwrap();
+    let port = 19876;
+    let engine = EbpfSnifferEngine::new(port, temp_dir.path().to_str().unwrap(), 1);
+
+    tokio::spawn(async move {
+        let _ = engine.run().await;
+    });
+
+    // Wait 50ms for listener to bind
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    // Send real HTTP stream packet
+    let mut client = TcpStream::connect(format!("127.0.0.1:{port}")).await.unwrap();
+    let payload = b"POST /api/v1/checkout HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\r\n{\"user_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"amount\":99.95}";
+    client.write_all(payload).await.unwrap();
+    client.flush().await.unwrap();
+
+    // Wait for snapshot write
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let store = SnapshotStore::new(temp_dir.path());
+    assert!(store.exists("POST__api_v1_checkout"));
+    let snapshot = store.read_snapshot("POST__api_v1_checkout").unwrap();
+    assert_eq!(snapshot.masked_body["user_id"], "<MASKED_UUID>");
+    assert_eq!(snapshot.masked_body["amount"], 99.95);
+}
