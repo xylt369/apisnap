@@ -3,7 +3,8 @@ use apisnap::config::{
     ApiSnapConfig, ArrayDiffMode, CustomMaskRule, EndpointConfig, HttpMethod, MaskingConfig,
 };
 use apisnap::engine::{
-    compare_json_ast, mask_value, scan_unmasked_secrets, DiffKind, DiffOptions, MaskContext,
+    compare_json_ast, mask_value, scan_unmasked_secrets, DiffKind, DiffOptions, FastJsonEngine,
+    MaskContext,
 };
 use apisnap::openapi::{generate_openapi_spec, verify_openapi_spec};
 use apisnap::snapshot::{SnapshotFile, SnapshotMetadata, SnapshotStore};
@@ -68,6 +69,17 @@ fn test_mandatory_2_array_reordering() {
         2,
         "Ordered mode must detect index differences"
     );
+
+    let modified_paths: Vec<&str> = ordered_diffs
+        .iter()
+        .map(|d| match d {
+            DiffKind::Modified { json_path, .. } => json_path.as_str(),
+            _ => "",
+        })
+        .collect();
+
+    assert!(modified_paths.contains(&"$.tags[0]"));
+    assert!(modified_paths.contains(&"$.tags[2]"));
 }
 
 /// 3. Custom Regex Rule Overrides Test (RFC Section 6.1 #3)
@@ -182,7 +194,7 @@ fn test_snapshot_store_atomic_roundtrip() {
             response_headers: [("content-type".to_string(), "application/json".to_string())]
                 .into_iter()
                 .collect(),
-            apisnap_version: "0.3.0".to_string(),
+            apisnap_version: "0.4.0".to_string(),
         },
         masked_body: json!({
             "users": [
@@ -226,7 +238,24 @@ async fn test_v030_auth_provider_headers() {
     );
 }
 
-/// 8. v0.5.0 Bidirectional OpenAPI Generation and Round-Trip Verification Test
+/// 8. v0.4.0 SIMD-JSON Fast Parser and Arena Execution Test
+#[test]
+fn test_v040_simd_and_arena_acceleration() {
+    let engine = FastJsonEngine::new(64);
+    let mut payload = br#"{"dataset": [100, 200, 300], "status": "processed"}"#.to_vec();
+
+    let parsed = engine.parse_slice(&mut payload).unwrap();
+    assert_eq!(parsed["status"], "processed");
+
+    // Arena scoped execution
+    let processed_len = engine.with_arena(|bump| {
+        let list = bumpalo::vec![in bump; "record1", "record2", "record3"];
+        list.len()
+    });
+    assert_eq!(processed_len, 3);
+}
+
+/// 9. v0.5.0 Bidirectional OpenAPI Generation and Round-Trip Verification Test
 #[test]
 fn test_v050_openapi_generate_and_verify_roundtrip() {
     let tmp_dir = tempdir().unwrap();
@@ -241,7 +270,7 @@ fn test_v050_openapi_generate_and_verify_roundtrip() {
             duration_ms: 12,
             status_code: 200,
             response_headers: Default::default(),
-            apisnap_version: "0.3.0".to_string(),
+            apisnap_version: "0.4.0".to_string(),
         },
         masked_body: json!({
             "user_id": "<MASKED_UUID>",

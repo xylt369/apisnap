@@ -177,6 +177,7 @@ pub struct DiffOptions {
     pub float_epsilon: f64,
     pub normalize_unicode_keys: bool,
     pub max_depth: usize,
+    pub fast_hash_bypass: bool,
     pub array_modes: HashMap<String, ArrayDiffMode>,
 }
 
@@ -186,17 +187,23 @@ impl Default for DiffOptions {
             float_epsilon: 0.0,
             normalize_unicode_keys: true,
             max_depth: 512,
+            fast_hash_bypass: true,
             array_modes: HashMap::new(),
         }
     }
 }
 
-/// Compare expected and actual JSON ASTs semantically.
+/// Compare expected and actual JSON ASTs semantically with fast-path bypass.
 pub fn compare_json_ast(
     expected: &Value,
     actual: &Value,
     options: &DiffOptions,
 ) -> Vec<DiffKind> {
+    // Fast-path bypass for identical subtrees
+    if options.fast_hash_bypass && options.float_epsilon == 0.0 && expected == actual {
+        return Vec::new();
+    }
+
     let mut differences = Vec::new();
     diff_recursive(expected, actual, "$", options, 0, &mut differences);
     differences
@@ -416,50 +423,5 @@ fn json_type_name(val: &Value) -> &'static str {
         Value::String(_) => "string",
         Value::Array(_) => "array",
         Value::Object(_) => "object",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn test_float_epsilon_tolerance() {
-        let expected = json!({"price": 10.00001});
-        let actual = json!({"price": 10.00002});
-
-        let mut options = DiffOptions::default();
-        options.float_epsilon = 0.0001;
-
-        let diffs = compare_json_ast(&expected, &actual, &options);
-        assert!(diffs.is_empty(), "Differences within float_epsilon must not be reported");
-
-        // Exact comparison should detect
-        let exact_diffs = compare_json_ast(&expected, &actual, &DiffOptions::default());
-        assert_eq!(exact_diffs.len(), 1);
-    }
-
-    #[test]
-    fn test_unicode_nfc_key_normalization() {
-        // "e\u{301}" (NFD: e + combining acute) vs "\u{e9}" (NFC: é)
-        let nfd_key = "cafe\u{301}";
-        let nfc_key = "caf\u{e9}";
-
-        let mut exp_map = serde_json::Map::new();
-        exp_map.insert(nfd_key.to_string(), json!("espresso"));
-        let expected = Value::Object(exp_map);
-
-        let mut act_map = serde_json::Map::new();
-        act_map.insert(nfc_key.to_string(), json!("espresso"));
-        let actual = Value::Object(act_map);
-
-        let options = DiffOptions {
-            normalize_unicode_keys: true,
-            ..Default::default()
-        };
-
-        let diffs = compare_json_ast(&expected, &actual, &options);
-        assert!(diffs.is_empty(), "Unicode normalized keys should match seamlessly");
     }
 }

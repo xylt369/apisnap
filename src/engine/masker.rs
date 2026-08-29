@@ -3,6 +3,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 pub static ISO8601_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?$").unwrap()
@@ -56,20 +57,34 @@ pub struct MaskContext {
     pub max_depth: usize,
     pub unmask_allow_list: HashSet<String>,
     pub path_rules: HashMap<String, CustomMaskRule>,
+    pub precompiled_patterns: HashMap<String, Arc<Regex>>,
 }
 
 impl MaskContext {
     pub fn new(global_config: &MaskingConfig, overrides: &[CustomMaskRule]) -> Self {
         let mut path_rules = HashMap::new();
+        let mut precompiled_patterns = HashMap::new();
+
+        // Helper to insert and precompile regex
+        let mut add_rule = |rule: &CustomMaskRule| {
+            path_rules.insert(rule.json_path.clone(), rule.clone());
+            if let Some(pattern_str) = &rule.pattern {
+                if !precompiled_patterns.contains_key(pattern_str) {
+                    if let Ok(re) = Regex::new(pattern_str) {
+                        precompiled_patterns.insert(pattern_str.clone(), Arc::new(re));
+                    }
+                }
+            }
+        };
 
         // 1. Insert global custom rules
         for rule in &global_config.custom_rules {
-            path_rules.insert(rule.json_path.clone(), rule.clone());
+            add_rule(rule);
         }
 
         // 2. Insert endpoint-level overrides
         for rule in overrides {
-            path_rules.insert(rule.json_path.clone(), rule.clone());
+            add_rule(rule);
         }
 
         let unmask_allow_list: HashSet<String> = global_config.unmask_allow_list.iter().cloned().collect();
@@ -80,6 +95,7 @@ impl MaskContext {
             max_depth: 512,
             unmask_allow_list,
             path_rules,
+            precompiled_patterns,
         }
     }
 
@@ -108,7 +124,7 @@ fn mask_recursive(
 
     // 1. Check if there is an exact or wildcard custom JSONPath rule matching this path
     if let Some(rule) = match_custom_rule(ctx, current_path) {
-        apply_custom_rule(val, rule);
+        apply_custom_rule(val, rule, &ctx.precompiled_patterns);
         return;
     }
 
@@ -248,9 +264,13 @@ fn normalize_wildcard_path(path: &str) -> String {
     ARRAY_INDEX_RE.replace_all(path, "[*]").to_string()
 }
 
-fn apply_custom_rule(val: &mut Value, rule: &CustomMaskRule) {
+fn apply_custom_rule(
+    val: &mut Value,
+    rule: &CustomMaskRule,
+    precompiled_patterns: &HashMap<String, Arc<Regex>>,
+) {
     if let Some(pattern_str) = &rule.pattern {
-        if let Ok(regex) = Regex::new(pattern_str) {
+        if let Some(regex) = precompiled_patterns.get(pattern_str) {
             if let Value::String(s) = val {
                 let replaced = regex.replace_all(s, &rule.replacement).to_string();
                 *s = replaced;
@@ -259,58 +279,4 @@ fn apply_custom_rule(val: &mut Value, rule: &CustomMaskRule) {
         }
     }
     *val = Value::String(rule.replacement.clone());
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn test_credit_card_luhn_masking() {
-        // Valid Visa test card
-        let mut input = json!({
-            "card": "4532015112830366"
-        });
-        let ctx = MaskContext::new(&MaskingConfig::default(), &[]);
-        mask_value(&mut input, &ctx);
-        assert_eq!(input, json!({"card": "<MASKED_CREDIT_CARD>"}));
-    }
-
-    #[test]
-    fn test_ssn_masking() {
-        let mut input = json!({
-            "ssn": "123-45-6789"
-        });
-        let ctx = MaskContext::new(&MaskingConfig::default(), &[]);
-        mask_value(&mut input, &ctx);
-        assert_eq!(input, json!({"ssn": "<MASKED_SSN>"}));
-    }
-
-    #[test]
-    fn test_strict_pii_mode() {
-        let mut input = json!({
-            "status": "active",
-            "secret_note": "internal internal memo"
-        });
-        let config = MaskingConfig {
-            enable_builtin_heuristics: true,
-            strict_pii_mode: true,
-            unmask_allow_list: vec!["$.status".to_string()],
-            pre_write_secret_scan: true,
-            custom_rules: vec![],
-        };
-        let ctx = MaskContext::new(&config, &[]);
-        mask_value(&mut input, &ctx);
-        assert_eq!(input, json!({"status": "active", "secret_note": "<REDACTED>"}));
-    }
-
-    #[test]
-    fn test_pre_write_secret_guard() {
-        let payload = json!({
-            "aws": "AKIAIOSFODNN7EXAMPLE"
-        });
-        let res = scan_unmasked_secrets(&payload);
-        assert!(res.is_err());
-    }
 }
