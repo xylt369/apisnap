@@ -51,6 +51,24 @@ pub struct ApiSnapConfig {
     pub snapshot_dir: String,
 }
 
+impl Default for ApiSnapConfig {
+    fn default() -> Self {
+        Self {
+            base_url: "http://localhost:8000".to_string(),
+            timeout: default_timeout(),
+            concurrency: default_concurrency(),
+            max_depth: default_max_depth(),
+            float_epsilon: default_float_epsilon(),
+            normalize_unicode_keys: true,
+            auth: None,
+            global_headers: HashMap::new(),
+            masking: MaskingConfig::default(),
+            endpoints: Vec::new(),
+            snapshot_dir: default_snapshot_dir(),
+        }
+    }
+}
+
 fn default_timeout() -> Duration {
     Duration::from_secs(30)
 }
@@ -107,6 +125,17 @@ impl std::fmt::Display for HttpMethod {
     }
 }
 
+pub type Method = HttpMethod;
+
+/// Upstream dependency declaration for cross-service blast radius analysis.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct UpstreamDependency {
+    pub upstream_endpoint: String,
+    pub consumed_json_paths: Vec<String>,
+    #[serde(default)]
+    pub owning_team: Option<String>,
+}
+
 /// Configuration for a single API endpoint under test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EndpointConfig {
@@ -150,6 +179,9 @@ pub struct EndpointConfig {
 
     #[serde(default)]
     pub array_modes: HashMap<String, ArrayDiffMode>,
+
+    #[serde(default)]
+    pub upstream_dependencies: Vec<UpstreamDependency>,
 }
 
 fn default_expected_status() -> u16 {

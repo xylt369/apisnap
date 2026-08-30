@@ -27,6 +27,7 @@ impl ReqwestExecutor {
             .redirect(reqwest::redirect::Policy::limited(10))
             .gzip(true)
             .brotli(true)
+            .no_proxy()
             .build()
             .expect("Failed to build reqwest HTTP client");
 

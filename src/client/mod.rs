@@ -1,10 +1,12 @@
 pub mod auth;
 pub mod grpc;
 pub mod http;
+pub mod proxy_capture;
 
 pub use auth::*;
 pub use grpc::*;
 pub use http::*;
+pub use proxy_capture::*;
 
 use crate::config::EndpointConfig;
 use crate::error::ApiSnapError;

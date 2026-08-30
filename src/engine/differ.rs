@@ -45,6 +45,19 @@ pub enum DiffKind {
     },
 }
 
+impl DiffKind {
+    pub fn json_path(&self) -> &str {
+        match self {
+            DiffKind::Added { json_path, .. } => json_path,
+            DiffKind::Removed { json_path, .. } => json_path,
+            DiffKind::Modified { json_path, .. } => json_path,
+            DiffKind::TypeMismatch { json_path, .. } => json_path,
+            DiffKind::ArrayLengthMismatch { json_path, .. } => json_path,
+            DiffKind::DepthExceeded { json_path, .. } => json_path,
+        }
+    }
+}
+
 /// Aggregated result of diffing an endpoint's actual response against its snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DiffReport {

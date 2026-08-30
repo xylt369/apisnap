@@ -21,6 +21,12 @@ impl NodeHash {
     }
 }
 
+impl AsRef<[u8]> for NodeHash {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 /// AST 节点的 Merkle 化表示，替代裸 `serde_json::Value` 作为落盘单元。
 /// 每个变体只存储"直接子节点的哈希"而非子节点本体，实现结构共享。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -48,14 +54,6 @@ pub struct MerkleCasStore {
     root_dir: PathBuf,
     /// 进程内 LRU 缓存，避免同一 CAS 运行中重复读盘反序列化。
     cache: HashMap<NodeHash, MerkleNode>,
-}
-
-/// 一个具名快照现在只需存储"根哈希 + 元数据"，AST 本体完全下沉到 CAS。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MerkleSnapshotPointer {
-    pub endpoint_name: String,
-    pub root_hash: NodeHash,
-    pub metadata: crate::snapshot::SnapshotMetadata,
 }
 
 impl MerkleCasStore {

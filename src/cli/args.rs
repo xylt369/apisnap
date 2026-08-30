@@ -17,6 +17,9 @@ pub enum Commands {
     /// Scaffold a new starter apisnap.toml configuration file
     Init(InitArgs),
 
+    /// Ingest endpoints from external sources (cURL, Postman collection, or HAR file)
+    Import(ImportArgs),
+
     /// Query endpoints and record baseline golden snapshots (.snap.json)
     Record(RecordArgs),
 
@@ -25,6 +28,18 @@ pub enum Commands {
 
     /// Interactively review snapshot differences in the terminal and accept/reject changes
     Review(ReviewArgs),
+
+    /// Whitelist an intentional schema breaking change in the approval ledger
+    ApproveDiff(ApproveDiffArgs),
+
+    /// API Behavioral Timeline (Time Machine for API state and latency evolution)
+    Timeline(TimelineArgs),
+
+    /// Cross-service blast radius analysis calculating cascading impact on downstream consumers
+    BlastRadius(BlastRadiusArgs),
+
+    /// Local transparent capture proxy that records golden snapshots from real app traffic
+    Capture(CaptureArgs),
 
     /// Run intelligent boundary fuzzing to detect 500 crashes and unhandled stack trace leaks
     Fuzz(FuzzArgs),
@@ -50,6 +65,28 @@ pub struct InitArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct ImportArgs {
+    /// Path to config file to update
+    #[arg(short, long, default_value = "apisnap.toml")]
+    pub config: String,
+
+    #[command(subcommand)]
+    pub source: ImportSource,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ImportSource {
+    /// Import an endpoint from a raw cURL command
+    Curl { command: String },
+
+    /// Import endpoints from a Postman Collection JSON file (v2.0 or v2.1)
+    Postman { file: String },
+
+    /// Import API endpoints from an HTTP Archive (HAR) file exported from DevTools
+    Har { file: String },
+}
+
+#[derive(Debug, Args)]
 pub struct RecordArgs {
     /// Path to apisnap.toml or apisnap.yaml configuration file
     #[arg(short, long, default_value = "apisnap.toml")]
@@ -66,6 +103,10 @@ pub struct RecordArgs {
     /// Enable Merkle DAG Content-Addressable Storage (CAS) deduplication
     #[arg(long)]
     pub cas: bool,
+
+    /// Number of probe iterations to run for adaptive noise learning
+    #[arg(long)]
+    pub learn: Option<usize>,
 }
 
 #[derive(Debug, Args)]
@@ -89,6 +130,14 @@ pub struct TestArgs {
     /// Output GitHub Actions Pull Request Markdown comment format
     #[arg(long)]
     pub pr_comment: bool,
+
+    /// Baseline branch or pointer name for team CAS comparison (e.g. main)
+    #[arg(long)]
+    pub baseline: Option<String>,
+
+    /// Candidate branch or pointer name for team CAS comparison (e.g. pr-4521)
+    #[arg(long)]
+    pub candidate: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -100,6 +149,80 @@ pub struct ReviewArgs {
     /// Optional name of a single endpoint to review
     #[arg(short, long)]
     pub endpoint: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ApproveDiffArgs {
+    /// Name of the endpoint with intentional changes
+    #[arg(short, long)]
+    pub endpoint: String,
+
+    /// Author or developer whitelisting the change
+    #[arg(short, long, default_value = "developer")]
+    pub author: String,
+
+    /// Rationale for the intentional breaking change
+    #[arg(short, long)]
+    pub reason: String,
+
+    /// Snapshot directory containing approval ledger
+    #[arg(short, long, default_value = "__snapshots__")]
+    pub snapshot_dir: String,
+}
+
+#[derive(Debug, Args)]
+pub struct TimelineArgs {
+    /// Snapshot or CAS base directory
+    #[arg(short, long, default_value = "__snapshots__/.cas")]
+    pub dir: String,
+
+    #[command(subcommand)]
+    pub action: TimelineAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TimelineAction {
+    /// Show historical observation commits for an endpoint
+    Show {
+        endpoint: String,
+        #[arg(short, long, default_value = "10")]
+        limit: usize,
+    },
+
+    /// Compute full AST DiffReport between two historical moments in time
+    Diff {
+        endpoint: String,
+        #[arg(long)]
+        commit_a: String,
+        #[arg(long)]
+        commit_b: String,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct BlastRadiusArgs {
+    /// Path to apisnap.toml configuration file
+    #[arg(short, long, default_value = "apisnap.toml")]
+    pub config: String,
+
+    /// Target endpoint whose changes to analyze
+    #[arg(short, long)]
+    pub endpoint: String,
+}
+
+#[derive(Debug, Args)]
+pub struct CaptureArgs {
+    /// Address and port for the local reverse proxy to listen on
+    #[arg(short, long, default_value = "127.0.0.1:9090")]
+    pub proxy: String,
+
+    /// Target upstream service URL
+    #[arg(short, long, default_value = "http://127.0.0.1:8000")]
+    pub target: String,
+
+    /// Target snapshot directory
+    #[arg(short, long, default_value = "__snapshots__")]
+    pub snapshot_dir: String,
 }
 
 #[derive(Debug, Args)]

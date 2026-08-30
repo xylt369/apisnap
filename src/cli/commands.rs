@@ -48,6 +48,7 @@ pub async fn handle_record(
     endpoint_filter: Option<&str>,
     concurrency_override: Option<usize>,
     enable_cas: bool,
+    learn_iterations: Option<usize>,
 ) -> Result<(), ApiSnapError> {
     let config = ApiSnapConfig::load_from_file(config_path)?;
     let encryptor = SnapshotEncryptor::from_env().transpose()?;
@@ -67,6 +68,39 @@ pub async fn handle_record(
     if filtered_endpoints.is_empty() {
         println!("{}", "No matching endpoints found to record.".yellow());
         return Ok(());
+    }
+
+    if let Some(learn_count) = learn_iterations {
+        println!(
+            "\n{} Running adaptive noise learning ({} probe iterations)...",
+            "ApiSnap".cyan().bold(),
+            learn_count
+        );
+        for endpoint in &filtered_endpoints {
+            let mask_ctx = MaskContext::new(&config.masking, &endpoint.mask_overrides);
+            if let Ok(report) = crate::engine::AdaptiveBaselineLearner::learn_endpoint(
+                endpoint,
+                &config.base_url,
+                &config.global_headers,
+                global_auth.as_deref(),
+                learn_count,
+                &mask_ctx,
+            )
+            .await
+            {
+                if !report.candidate_rules.is_empty() {
+                    println!(
+                        "  {} Discovered {} volatile path(s) for [{}]:",
+                        "[LEARNED NOISE]".yellow().bold(),
+                        report.candidate_rules.len(),
+                        endpoint.name.bold()
+                    );
+                    for rule in &report.candidate_rules {
+                        println!("    -> Candidate mask rule: {}", rule.json_path.cyan());
+                    }
+                }
+            }
+        }
     }
 
     let concurrency = concurrency_override.unwrap_or(config.concurrency);
@@ -93,6 +127,10 @@ pub async fn handle_record(
 
     progress.finish_and_clear();
 
+    let cas_dir = Path::new(&config.snapshot_dir).join(".cas");
+    let mut cas_store = MerkleCasStore::new(&cas_dir).ok();
+    let timeline = crate::storage::TimelineStore::new(&cas_dir);
+
     let mut recorded_count = 0;
     for (endpoint, raw_res_result) in results {
         let raw_res = raw_res_result?;
@@ -101,6 +139,19 @@ pub async fn handle_record(
         let mask_ctx = MaskContext::new(&config.masking, &endpoint.mask_overrides)
             .with_max_depth(config.max_depth);
         mask_value(&mut masked_body, &mask_ctx);
+
+        if let Some(ref mut cas) = cas_store {
+            if let Ok(node_hash) = cas.ingest(&masked_body) {
+                let _ = timeline.record_observation(
+                    &endpoint.name,
+                    node_hash,
+                    raw_res.duration_ms as f64,
+                    raw_res.status_code,
+                    crate::storage::ObservationSource::ManualRecord,
+                    cas,
+                );
+            }
+        }
 
         let snapshot = SnapshotFile {
             endpoint_name: endpoint.name.clone(),
@@ -140,12 +191,20 @@ pub async fn handle_test(
     concurrency_override: Option<usize>,
     is_ci: bool,
     pr_comment: bool,
+    baseline: Option<&str>,
+    candidate: Option<&str>,
 ) -> Result<(), ApiSnapError> {
     let start_instant = Instant::now();
     let config = ApiSnapConfig::load_from_file(config_path)?;
     let encryptor = SnapshotEncryptor::from_env().transpose()?;
     let store = SnapshotStore::new(&config.snapshot_dir)
         .with_encryptor(encryptor);
+
+    // If comparing two branch pointers directly
+    if let (Some(base_ref), Some(cand_ref)) = (baseline, candidate) {
+        return handle_test_branch_pointers(&config, base_ref, cand_ref, is_ci, pr_comment).await;
+    }
+
     let executor = Arc::new(ReqwestExecutor::new(config.timeout));
     let grpc_executor = Arc::new(GrpcExecutor::new(config.timeout));
 
@@ -191,6 +250,7 @@ pub async fn handle_test(
         progress.finish_and_clear();
     }
 
+    let approval_ledger = crate::snapshot::ApprovalLedger::load_from_dir(Path::new(&config.snapshot_dir)).unwrap_or_default();
     let mut reports = Vec::new();
     let mut total_mismatches = 0;
 
@@ -230,10 +290,11 @@ pub async fn handle_test(
             (None, None)
         };
 
+        let is_approved = approval_ledger.is_approved(&endpoint.name);
         let report = DiffReport {
             endpoint_name: endpoint.name.clone(),
             differences,
-            is_match,
+            is_match: is_match || is_approved,
             expected_status: endpoint.expected_status,
             actual_status: raw_res.status_code,
             trace_context,
@@ -566,6 +627,285 @@ pub fn handle_cas(args: &CasArgs) -> Result<(), ApiSnapError> {
             println!("{}", serde_json::to_string_pretty(&restored_val).unwrap());
         }
     }
+    Ok(())
+}
+
+pub async fn handle_test_branch_pointers(
+    config: &ApiSnapConfig,
+    baseline_ref: &str,
+    candidate_ref: &str,
+    is_ci: bool,
+    pr_comment: bool,
+) -> Result<(), ApiSnapError> {
+    let start_instant = Instant::now();
+    let cas_dir = Path::new(&config.snapshot_dir).join(".cas");
+    let mut cas = MerkleCasStore::new(&cas_dir).map_err(|e| ApiSnapError::Io {
+        path: cas_dir.display().to_string(),
+        source: e,
+    })?;
+
+    let base_dir = Path::new(&config.snapshot_dir).join(baseline_ref);
+    let cand_dir = Path::new(&config.snapshot_dir).join(candidate_ref);
+
+    let mut reports = Vec::new();
+    let mut total_mismatches = 0;
+
+    for endpoint in &config.endpoints {
+        let base_ptr_path = base_dir.join(format!("{}.ptr", endpoint.name));
+        let cand_ptr_path = cand_dir.join(format!("{}.ptr", endpoint.name));
+
+        if !base_ptr_path.exists() || !cand_ptr_path.exists() {
+            continue;
+        }
+
+        let base_ptr = crate::storage::MerkleSnapshotPointer::load(&base_ptr_path)?;
+        let cand_ptr = crate::storage::MerkleSnapshotPointer::load(&cand_ptr_path)?;
+
+        let base_snap = base_ptr.reconstruct(&mut cas)?;
+        let cand_snap = cand_ptr.reconstruct(&mut cas)?;
+
+        let diff_options = DiffOptions {
+            float_epsilon: endpoint.float_epsilon_override.unwrap_or(config.float_epsilon),
+            normalize_unicode_keys: config.normalize_unicode_keys,
+            max_depth: config.max_depth,
+            fast_hash_bypass: true,
+            array_modes: endpoint.array_modes.clone(),
+        };
+
+        let differences = compare_json_ast(&base_snap.masked_body, &cand_snap.masked_body, &diff_options);
+        let is_match = differences.is_empty();
+
+        let report = DiffReport {
+            endpoint_name: endpoint.name.clone(),
+            differences,
+            is_match,
+            expected_status: base_ptr.status_code,
+            actual_status: cand_ptr.status_code,
+            trace_context: None,
+            trace_link: None,
+        };
+
+        if !report.passed() {
+            total_mismatches += 1;
+        }
+        reports.push(report);
+    }
+
+    let elapsed_ms = start_instant.elapsed().as_millis() as u64;
+    if pr_comment {
+        let markdown = generate_pr_comment_markdown(&reports, elapsed_ms);
+        println!("{markdown}");
+    } else if is_ci {
+        let json_report = serde_json::to_string_pretty(&reports).unwrap();
+        println!("{json_report}");
+    } else {
+        print_summary_report(&reports, elapsed_ms, is_ci);
+    }
+
+    if total_mismatches > 0 {
+        return Err(ApiSnapError::DiffMismatch {
+            endpoint_name: format!("Branch diff ({} vs {})", baseline_ref, candidate_ref),
+            diff_count: total_mismatches,
+        });
+    }
+
+    Ok(())
+}
+
+pub fn handle_import(args: &crate::cli::args::ImportArgs) -> Result<(), ApiSnapError> {
+    let mut config = if Path::new(&args.config).exists() {
+        ApiSnapConfig::load_from_file(&args.config)?
+    } else {
+        ApiSnapConfig::default()
+    };
+
+    let imported_endpoints = match &args.source {
+        crate::cli::args::ImportSource::Curl { command } => {
+            vec![crate::importer::CurlImporter::parse(command)?]
+        }
+        crate::cli::args::ImportSource::Postman { file } => {
+            let content = fs::read_to_string(file).map_err(|e| ApiSnapError::Io {
+                path: file.clone(),
+                source: e,
+            })?;
+            crate::importer::PostmanImporter::parse_collection(&content)?
+        }
+        crate::cli::args::ImportSource::Har { file } => {
+            let content = fs::read_to_string(file).map_err(|e| ApiSnapError::Io {
+                path: file.clone(),
+                source: e,
+            })?;
+            crate::importer::HarImporter::parse_har(&content)?
+        }
+    };
+
+    let count = imported_endpoints.len();
+    for ep in imported_endpoints {
+        if let Some(existing) = config.endpoints.iter_mut().find(|e| e.name == ep.name) {
+            *existing = ep;
+        } else {
+            config.endpoints.push(ep);
+        }
+    }
+
+    let toml_str = toml::to_string_pretty(&config).map_err(|e| ApiSnapError::InvalidConfig {
+        location: args.config.clone(),
+        reason: e.to_string(),
+    })?;
+
+    fs::write(&args.config, toml_str).map_err(|e| ApiSnapError::Io {
+        path: args.config.clone(),
+        source: e,
+    })?;
+
+    println!(
+        "\n{} Successfully imported {} endpoint(s) into '{}'.",
+        "[SUCCESS]".green().bold(),
+        count,
+        args.config.cyan()
+    );
+    Ok(())
+}
+
+pub fn handle_approve_diff(args: &crate::cli::args::ApproveDiffArgs) -> Result<(), ApiSnapError> {
+    let dir = Path::new(&args.snapshot_dir);
+    let mut ledger = crate::snapshot::ApprovalLedger::load_from_dir(dir)?;
+    ledger.approve(&args.endpoint, &args.author, &args.reason, dir)?;
+
+    println!(
+        "\n{} Approved intentional breaking changes for endpoint '{}'.",
+        "[APPROVED]".green().bold(),
+        args.endpoint.cyan().bold()
+    );
+    println!("  Author: {}", args.author);
+    println!("  Reason: {}", args.reason);
+    Ok(())
+}
+
+pub fn handle_timeline(args: &crate::cli::args::TimelineArgs) -> Result<(), ApiSnapError> {
+    let cas_dir = Path::new(&args.dir);
+    let mut cas = MerkleCasStore::new(cas_dir).map_err(|e| ApiSnapError::Io {
+        path: args.dir.clone(),
+        source: e,
+    })?;
+    let timeline = crate::storage::TimelineStore::new(cas_dir);
+
+    match &args.action {
+        crate::cli::args::TimelineAction::Show { endpoint, limit } => {
+            let commits = timeline.get_timeline(endpoint, *limit)?;
+            if commits.is_empty() {
+                println!("{}", format!("No historical timeline records found for endpoint '{endpoint}'.").yellow());
+                return Ok(());
+            }
+
+            println!(
+                "\n{} Behavioral Timeline for [{}] (latest {} commits):",
+                "ApiSnap".cyan().bold(),
+                endpoint.bold(),
+                commits.len()
+            );
+            println!("{:<14} | {:<25} | {:<8} | {:<10} | {:<18}", "COMMIT ID", "OBSERVED AT", "STATUS", "LATENCY", "DELTA SUMMARY");
+            println!("{:-<14}-|-{:-<25}-|-{:-<8}-|-{:-<10}-|-{:-<18}", "", "", "", "", "");
+
+            for c in commits {
+                let delta_str = format!("+{} -{} ~{} (Δ{:.1}ms)",
+                    c.structural_delta_summary.fields_added,
+                    c.structural_delta_summary.fields_removed,
+                    c.structural_delta_summary.fields_type_changed,
+                    c.structural_delta_summary.latency_delta_ms
+                );
+                let short_id = if c.commit_id.len() >= 12 { &c.commit_id[..12] } else { &c.commit_id };
+                let time_str = if c.observed_at.len() >= 19 { &c.observed_at[..19] } else { &c.observed_at };
+                println!("{:<14} | {:<25} | {:<8} | {:<10} | {:<18}",
+                    short_id.cyan(),
+                    time_str,
+                    c.status_code,
+                    format!("{:.1}ms", c.latency_ms),
+                    delta_str.dimmed()
+                );
+            }
+        }
+        crate::cli::args::TimelineAction::Diff { endpoint, commit_a, commit_b } => {
+            let commits = timeline.get_timeline(endpoint, 100)?;
+            let c_a = commits.iter().find(|c| c.commit_id.starts_with(commit_a)).ok_or_else(|| {
+                ApiSnapError::InvalidConfig {
+                    location: commit_a.clone(),
+                    reason: format!("Commit ID '{commit_a}' not found"),
+                }
+            })?;
+            let c_b = commits.iter().find(|c| c.commit_id.starts_with(commit_b)).ok_or_else(|| {
+                ApiSnapError::InvalidConfig {
+                    location: commit_b.clone(),
+                    reason: format!("Commit ID '{commit_b}' not found"),
+                }
+            })?;
+
+            let report = timeline.diff_historical_commits(&mut cas, c_a, c_b)?;
+            print_summary_report(&[report], Instant::now().elapsed().as_millis() as u64, false);
+        }
+    }
+    Ok(())
+}
+
+pub async fn handle_blast_radius(args: &crate::cli::args::BlastRadiusArgs) -> Result<(), ApiSnapError> {
+    let config = ApiSnapConfig::load_from_file(&args.config)?;
+    let target_ep = config.endpoints.iter().find(|e| e.name == args.endpoint).ok_or_else(|| {
+        ApiSnapError::InvalidConfig {
+            location: args.endpoint.clone(),
+            reason: format!("Endpoint '{}' not found in config", args.endpoint),
+        }
+    })?;
+
+    let store = SnapshotStore::new(&config.snapshot_dir);
+    let stored_snapshot = store.read_snapshot(&args.endpoint)?;
+
+    let executor = ReqwestExecutor::new(config.timeout);
+    let global_auth = config.auth.as_ref().map(|auth_cfg| create_auth_provider(auth_cfg, executor.client()));
+    let live_res = executor.execute(target_ep, &config.base_url, &config.global_headers, global_auth.as_deref()).await?;
+
+    let mut live_body = live_res.body;
+    let mask_ctx = MaskContext::new(&config.masking, &target_ep.mask_overrides);
+    mask_value(&mut live_body, &mask_ctx);
+
+    let diff_opts = DiffOptions::default();
+    let diffs = compare_json_ast(&stored_snapshot.masked_body, &live_body, &diff_opts);
+
+    let report = crate::engine::BlastRadiusCalculator::calculate(&args.endpoint, &diffs, &config.endpoints);
+    println!("\n{}", report.format_markdown());
+    Ok(())
+}
+
+pub async fn handle_capture(args: &crate::cli::args::CaptureArgs) -> Result<(), ApiSnapError> {
+    let listen_addr: std::net::SocketAddr = args.proxy.parse().map_err(|e| ApiSnapError::InvalidConfig {
+        location: args.proxy.clone(),
+        reason: format!("Invalid proxy socket address: {e}"),
+    })?;
+
+    let cfg = crate::client::ProxyCaptureConfig {
+        listen_addr,
+        target_upstream: args.target.clone(),
+        snapshot_dir: std::path::PathBuf::from(&args.snapshot_dir),
+        masking: crate::config::MaskingConfig::default(),
+    };
+
+    let engine = crate::client::ProxyCaptureEngine::new(cfg);
+    let (tx, rx) = tokio::sync::broadcast::channel(1);
+
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        let _ = tx.send(());
+    });
+
+    println!(
+        "\n{} Starting Local Transparent Capture Proxy on http://{} -> {}",
+        "ApiSnap".cyan().bold(),
+        args.proxy.green().bold(),
+        args.target.cyan()
+    );
+    println!("Point your client/browser to http://{} to automatically record golden snapshots.", args.proxy);
+    println!("Press Ctrl+C to stop capture.\n");
+
+    engine.start(rx).await?;
     Ok(())
 }
 
